@@ -1,0 +1,9 @@
+
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+passlib[bcrypt]
+python-jose[cryptography]
+pandas
+pytest
