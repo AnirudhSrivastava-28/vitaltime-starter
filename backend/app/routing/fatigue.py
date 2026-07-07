@@ -11,6 +11,10 @@ from app.routing.models import TaskHistoryEntry
 
 
 def hours_in_shift(shift_start: datetime, now: datetime) -> float:
+    if shift_start.tzinfo is not None:
+        shift_start = shift_start.replace(tzinfo=None)
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
     delta = now - shift_start
     return max(0.0, delta.total_seconds() / 3600.0)
 
