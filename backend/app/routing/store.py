@@ -7,9 +7,10 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+from app.routing import eta
 from app.routing.constants import ROLE_QUALIFICATION
 from app.routing.fatigue import prune_task_history
-from app.routing.models import Event, Staff, StaffPosition, TaskHistoryEntry
+from app.routing.models import Event, Staff, StaffPosition, TaskHistoryEntry, TransitPlan
 
 _lock = threading.RLock()
 _staff: dict[str, Staff] = {}
@@ -121,15 +122,22 @@ def assign_staff_to_event(
     now: datetime,
 ) -> None:
     with _lock:
+        origin_room = eta.resolve_room(staff, now)
+        path, hop_times = eta.shortest_path(origin_room, event.room)
+
         event.status = "assigned"
         event.assigned_staff_id = staff.staff_id
         staff.status = "busy"
         staff.current_event_id = event.event_id
+        # current_position is the committed destination (used for status
+        # bookkeeping and "at rest" grouping once arrived); transit is the
+        # real in-progress move a client renders in the meantime.
         staff.current_position = StaffPosition(room=event.room)
+        staff.transit = TransitPlan(path=path, hop_times=hop_times, departure_time=now)
         staff.task_history = prune_task_history(staff.task_history, now)
 
 
-def release_interrupted_event(staff: Staff) -> Optional[str]:
+def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
     """Return interrupted event_id and mark it pending again."""
     with _lock:
         if not staff.current_event_id:
@@ -139,6 +147,10 @@ def release_interrupted_event(staff: Staff) -> Optional[str]:
         if interrupted and interrupted.status == "assigned":
             interrupted.status = "pending"
             interrupted.assigned_staff_id = None
+        # They were interrupted mid-route — snap to where they actually
+        # are, not the destination they never finished reaching.
+        staff.current_position = StaffPosition(room=eta.resolve_room(staff, now))
+        staff.transit = None
         staff.current_event_id = None
         staff.status = "available"
         return interrupted_id
@@ -159,6 +171,7 @@ def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
                 staff.task_history = prune_task_history(staff.task_history, now)
                 staff.status = "available"
                 staff.current_event_id = None
+                staff.transit = None
 
         event.status = "resolved"
         event.assigned_staff_id = None
