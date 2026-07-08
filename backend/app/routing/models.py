@@ -24,6 +24,20 @@ class StaffPosition:
 
 
 @dataclass
+class TransitPlan:
+    """A real, currently-in-progress move across the facility graph.
+
+    path/hop_times come directly from eta.shortest_path() — the same
+    function used for feasibility filtering — so the animation this
+    drives is never a client-side approximation of the routing decision;
+    it's a rendering of the exact decision.
+    """
+    path: list[str]           # ordered room ids, path[0] = origin, path[-1] = destination
+    hop_times: list[float]    # cumulative minutes-from-departure at each path index
+    departure_time: datetime
+
+
+@dataclass
 class Staff:
     staff_id: str
     role: StaffRole
@@ -33,6 +47,7 @@ class Staff:
     task_history: list[TaskHistoryEntry] = field(default_factory=list)
     status: StaffStatus = "available"
     current_event_id: Optional[str] = None
+    transit: Optional[TransitPlan] = None
 
 
 @dataclass
