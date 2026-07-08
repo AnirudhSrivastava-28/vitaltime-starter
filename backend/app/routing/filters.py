@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from app.routing import eta
 from app.routing.constants import QUAL_RANK, RESPONSE_WINDOWS, TIER_REQUIRED_QUAL
 from app.routing.fatigue import compute_fatigue
 from app.routing.models import Candidate, Event, Staff
+from app.routing.store import DEMO_TIME_SCALE
 
 
 def meets_qualification(staff: Staff, tier: int) -> bool:
@@ -17,20 +17,18 @@ def meets_qualification(staff: Staff, tier: int) -> bool:
 
 
 def is_time_feasible(staff: Staff, event: Event, now: datetime) -> tuple[bool, float]:
-    """Feasibility and ETA computed from the staff member's *true current
-    position* — resolve_room() accounts for staff still mid-transit toward
-    a prior destination, rather than trusting a pre-committed room they
-    haven't physically reached yet."""
-    origin = eta.resolve_room(staff, now)
-    _, hop_times = eta.shortest_path(origin, event.room)
-    travel_minutes = hop_times[-1]
+    """Feasibility and ETA computed from the staff member's *true* current
+    position — resolve_room accounts for in-progress transit rather than
+    trusting a destination they haven't physically reached yet."""
+    origin = eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
+    travel_minutes = eta.eta_minutes(origin, event.room)
     window = RESPONSE_WINDOWS[event.tier]
     return travel_minutes <= window, travel_minutes
 
 
 def is_available_for_tier(staff: Staff, tier: int) -> bool:
     if tier == 1:
-        return True
+        return True  # Tier 1 may interrupt (checked separately)
     return staff.status == "available"
 
 
