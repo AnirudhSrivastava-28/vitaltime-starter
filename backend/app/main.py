@@ -2,10 +2,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth, users, vitals, alerts, triage, audit, routing
+from app.routers import auth, users, vitals, alerts, triage, audit, routing, dashboard
 
 app = FastAPI(title="VitalTime API", version="0.4.0")
-
+app.include_router(dashboard.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
