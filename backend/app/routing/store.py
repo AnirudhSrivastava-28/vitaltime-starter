@@ -12,13 +12,26 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.routing import eta
 from app.routing.constants import ROLE_QUALIFICATION
 from app.routing.fatigue import prune_task_history
 from app.routing.models import Event, Staff, StaffPosition, TaskHistoryEntry, TransitPlan
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Normalize any datetime to naive UTC. Everything internal to this
+    module compares against datetime.utcnow() (naive); an aware datetime
+    slipping in anywhere (e.g. a client-supplied timestamp with a 'Z' or
+    offset that a caller forgot to normalize at the API boundary) raises
+    TypeError the instant it's compared. Defense-in-depth: normalize here
+    too, at every point an externally-supplied `now`/timestamp enters the
+    store, not just at the HTTP boundary."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 # ---- demo timing controls ---------------------------------------------------
 
@@ -182,7 +195,7 @@ def advance_simulation(now: Optional[datetime] = None) -> None:
     poll. If nothing polls for 10 seconds, the next read still resolves
     all transitions that should have happened during those 10 seconds.
     """
-    now = now or datetime.utcnow()
+    now = _naive_utc(now or datetime.utcnow())
     with _lock:
         for staff in _staff.values():
             _advance_single_staff(staff, now)
@@ -226,6 +239,7 @@ def create_event(
     escalated_from: Optional[str] = None,
 ) -> Event:
     _ensure_seeded()
+    submitted_at = _naive_utc(submitted_at)
     event = Event(
         event_id=str(uuid.uuid4()),
         room=room,
@@ -265,6 +279,7 @@ def assign_staff_to_event(
 ) -> None:
     """Assign staff → compute real transit plan from their *true* current
     position (may be mid-transit from a prior return trip)."""
+    now = _naive_utc(now)
     with _lock:
         origin_room = eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
         path, hop_times = eta.shortest_path(origin_room, event.room)
@@ -289,6 +304,7 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
     """Tier 1 preempts staff busy on a lower-tier event. The interrupted
     event becomes pending again; the staff member snaps to their real
     current position (not the destination they never reached)."""
+    now = _naive_utc(now)
     with _lock:
         if not staff.current_event_id:
             return None
@@ -310,6 +326,7 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
 def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
     """Manual override of the auto-lifecycle. Marks the event resolved
     immediately regardless of whether tending would have completed."""
+    now = _naive_utc(now)
     with _lock:
         event = _events.get(event_id)
         if event is None:
