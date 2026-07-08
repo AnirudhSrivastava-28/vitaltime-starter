@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.routing import engine, store
 from app.routing.models import Staff
@@ -19,6 +19,19 @@ class RouteEventRequest(BaseModel):
     room: str
     symptom_tags: list[str] = Field(default_factory=list)
     submitted_at: datetime
+
+    @field_validator("submitted_at")
+    @classmethod
+    def _ensure_naive_utc(cls, v: datetime) -> datetime:
+        """Clients may send an offset (e.g. a trailing 'Z'), which Pydantic
+        parses into a timezone-aware datetime. Everything internally is
+        naive UTC (datetime.utcnow()) — normalize once, here, at the
+        boundary, so nothing downstream ever has to reconcile aware vs
+        naive. Mixing the two raises TypeError on comparison, which is
+        exactly what was crashing /events and /staff-positions."""
+        if v.tzinfo is not None:
+            v = v.astimezone(timezone.utc).replace(tzinfo=None)
+        return v
 
 
 class RouteEventResponse(BaseModel):
