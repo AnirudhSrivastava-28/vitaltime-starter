@@ -33,7 +33,7 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
         )
 
     if chosen.interruptible:
-        interrupted_id = store.release_interrupted_event(chosen.staff)
+        interrupted_id = store.release_interrupted_event(chosen.staff, now)
         if interrupted_id:
             store.enqueue_pending(interrupted_id)
 
