@@ -1,27 +1,27 @@
-"""Routing orchestration — sequential processing, interrupt logic (spec §6, §7)."""
+"""Sequential dispatch orchestration (spec §6, §7)."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
 
-from app.routing.filters import build_candidates
-from app.routing.models import AssignmentResult, Event, Staff
+from app.routing import filters, store, tier
+from app.routing.models import AssignmentResult, Event
 from app.routing.scoring import select_candidate
-from app.routing import store
-from app.routing.tier import classify_tier
 
 
 def _assign_event(event: Event, now: datetime) -> AssignmentResult:
-    staff_pool = store.all_staff()
     events_by_id = {e.event_id: e for e in store.all_events()}
+    candidates = filters.build_candidates(
+        staff_pool=store.all_staff(),
+        event=event,
+        events_by_id=events_by_id,
+        now=now,
+    )
 
-    candidates = build_candidates(staff_pool, event, events_by_id, now)
-    chosen = select_candidate(candidates, event.tier)
-
+    chosen = select_candidate(candidates, tier=event.tier) if candidates else None
     if chosen is None:
         event.status = "pending"
-        event.assigned_staff_id = None
         store.enqueue_pending(event.event_id)
         return AssignmentResult(
             event_id=event.event_id,
@@ -49,63 +49,52 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
     )
 
 
-def route_event(
-    *,
-    room: str,
-    symptom_tags: list[str],
-    submitted_at: datetime,
-) -> AssignmentResult:
-    """Process a single incoming event (caller holds routing lock)."""
-    tier = classify_tier(symptom_tags)
-    event = store.create_event(
-        room=room,
-        tier=tier,
-        symptom_tags=symptom_tags,
-        submitted_at=submitted_at,
-    )
-    return _assign_event(event, submitted_at)
-
-
-def process_pending_events(now: Optional[datetime] = None) -> list[AssignmentResult]:
-    """Rescore queued events in arrival order after staff availability changes."""
-    now = now or datetime.utcnow()
-    results: list[AssignmentResult] = []
-
-    pending_ids = store.pop_pending_queue()
-    pending_ids.sort(
-        key=lambda eid: store.get_event(eid).submitted_at  # type: ignore[union-attr]
-        if store.get_event(eid)
-        else now
-    )
-
-    for event_id in pending_ids:
-        event = store.get_event(event_id)
-        if event is None or event.status != "pending":
-            continue
-        result = _assign_event(event, now)
-        results.append(result)
-
-    return results
-
-
 def route_event_sequential(
     *,
     room: str,
     symptom_tags: list[str],
     submitted_at: datetime,
 ) -> AssignmentResult:
-    """Public entry point — one event at a time (spec §6)."""
-    with store.routing_lock():
-        result = route_event(room=room, symptom_tags=symptom_tags, submitted_at=submitted_at)
-        process_pending_events(submitted_at)
-        return result
+    """Classify → attempt assign → if unassigned, park pending."""
+    # Bring state current before making a routing decision — a returning
+    # nurse who has actually reached home in the last few seconds should
+    # be a valid candidate for this new event.
+    store.advance_simulation(submitted_at)
+
+    tier_value = tier.classify_tier(symptom_tags)
+    event = store.create_event(
+        room=room,
+        tier=tier_value,
+        symptom_tags=symptom_tags,
+        submitted_at=submitted_at,
+    )
+    result = _assign_event(event, now=submitted_at)
+    # If this assignment interrupted a lower-tier task, that task is now
+    # pending — try to re-assign it before returning.
+    _process_pending(submitted_at)
+    return result
 
 
-def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[AssignmentResult]:
-    now = now or datetime.utcnow()
-    with store.routing_lock():
-        event = store.clear_assignment(event_id, now)
-        if event is None:
-            return None
-        pending_results = process_pending_events(now)
-        return pending_results[-1] if pending_results else None
+def _process_pending(now: datetime) -> Optional[AssignmentResult]:
+    """Re-attempt any queued pending events; return the last successful
+    assignment (if any) so the caller can surface it to the client."""
+    reassigned: Optional[AssignmentResult] = None
+    for pending_id in store.pop_pending_queue():
+        pending_event = store.get_event(pending_id)
+        if pending_event is None or pending_event.status != "pending":
+            continue
+        result = _assign_event(pending_event, now=now)
+        if result.status == "assigned":
+            reassigned = result
+    return reassigned
+
+
+def clear_assignment(event_id: str) -> Optional[AssignmentResult]:
+    """Manual override — mark the event resolved and re-attempt any
+    pending events (which may now find a candidate)."""
+    now = datetime.utcnow()
+    store.advance_simulation(now)
+    event = store.clear_assignment(event_id, now)
+    if event is None:
+        return None
+    return _process_pending(now)
