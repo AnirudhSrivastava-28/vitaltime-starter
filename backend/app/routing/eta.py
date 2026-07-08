@@ -11,6 +11,7 @@ of any node is its final shortest distance (all edge weights are non-negative).
 from __future__ import annotations
 
 import heapq
+import datetime as _dt
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -122,7 +123,15 @@ def resolve_room(staff: Staff, now: datetime, time_scale: float = 1.0) -> str:
     if transit is None:
         return staff.current_position.room
 
+    # Defense-in-depth: normalize here too, independent of whatever the
+    # caller already did. now/departure passing an aware datetime raises
+    # TypeError on subtraction otherwise.
+    if now.tzinfo is not None:
+        now = now.astimezone(_dt.timezone.utc).replace(tzinfo=None)
     departure = transit.departure_time
+    if departure.tzinfo is not None:
+        departure = departure.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+
     elapsed_real_seconds = (now - departure).total_seconds()
     elapsed_sim_minutes = (elapsed_real_seconds / 60.0) * time_scale
     hop_times = transit.hop_times
