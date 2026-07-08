@@ -5,13 +5,13 @@ Uses a proper Dijkstra (min-heap, return-on-first-pop) rather than a FIFO
 queue relaxation — a FIFO queue can dequeue a node before its true shortest
 distance has been finalized on a weighted graph, silently returning a
 larger-than-actual ETA. Dijkstra with a min-heap guarantees the first pop
-of any node is its final shortest distance (non-negative weights, which
-all facility edges are).
+of any node is its final shortest distance (all edge weights are non-negative).
 """
 
 from __future__ import annotations
 
 import heapq
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 from app.routing.models import Staff
@@ -55,20 +55,17 @@ def _get_graph() -> Dict[str, list[tuple[str, float]]]:
 
 
 def shortest_path(from_room: str, to_room: str) -> Tuple[List[str], List[float]]:
-    """Dijkstra's algorithm. Returns (ordered room path incl. both endpoints,
-    cumulative minutes-from-origin at each node in that path).
+    """Dijkstra. Returns (ordered rooms including both endpoints,
+    cumulative minutes-from-origin at each node).
 
-    hop_times[0] is always 0.0 (time at origin). hop_times[-1] is the total
-    ETA, equivalent to what eta_minutes() used to return alone.
+    hop_times[0] is always 0.0. hop_times[-1] is the total ETA in minutes.
     """
     if from_room == to_room:
         return [from_room], [0.0]
 
     graph = _get_graph()
     if from_room not in graph or to_room not in graph:
-        # Unknown room — conservative fallback so events are not silently
-        # dropped. Matches the old function's fallback ETA.
-        return [from_room, to_room], [0.0, 5.0]
+        return [from_room, to_room], [0.0, 5.0]  # conservative fallback
 
     dist: Dict[str, float] = {from_room: 0.0}
     prev: Dict[str, str] = {}
@@ -90,7 +87,7 @@ def shortest_path(from_room: str, to_room: str) -> Tuple[List[str], List[float]]
                 heapq.heappush(heap, (nd, neighbor))
 
     if to_room not in dist:
-        return [from_room, to_room], [0.0, 999.0]  # unreachable
+        return [from_room, to_room], [0.0, 999.0]
 
     path = [to_room]
     while path[-1] != from_room:
@@ -106,35 +103,38 @@ def shortest_path(from_room: str, to_room: str) -> Tuple[List[str], List[float]]
 
 
 def eta_minutes(from_room: str, to_room: str) -> float:
-    """Shortest total travel time in minutes. Kept for callers that only
-    need the scalar; internally just the last cumulative hop time."""
+    """Shortest total travel time in minutes."""
     _, cumulative = shortest_path(from_room, to_room)
     return cumulative[-1]
 
 
-def resolve_room(staff: Staff, now) -> str:
-    """The last room this staff member has actually reached, even if a
-    transit toward a new destination is currently in progress.
+def resolve_room(staff: Staff, now: datetime, time_scale: float = 1.0) -> str:
+    """Last room this staff has actually reached, accounting for in-progress
+    transit. Conservatively returns the room *behind* the staff if they're
+    partway down a corridor — any new ETA computed from here is never an
+    underestimate of real remaining distance.
 
-    Deliberately conservative: if they're partway down a corridor segment,
-    this returns the room *behind* them, not credit for partial progress
-    into the next hop. Any new ETA computed from this point is therefore
-    never an underestimate of real remaining distance.
+    `time_scale` translates real elapsed seconds into sim-minutes at the
+    demo's accelerated pace. Passed in by the caller (routing decisions use
+    scaled time so the sim's internal clock is consistent).
     """
     transit = staff.transit
     if transit is None:
         return staff.current_position.room
 
     departure = transit.departure_time
-    elapsed_minutes = (now - departure).total_seconds() / 60.0
+    elapsed_real_seconds = (now - departure).total_seconds()
+    elapsed_sim_minutes = (elapsed_real_seconds / 60.0) * time_scale
     hop_times = transit.hop_times
 
-    if elapsed_minutes >= hop_times[-1]:
-        return staff.current_position.room  # already arrived
+    if elapsed_sim_minutes >= hop_times[-1]:
+        # Already arrived — for outbound this is the event room, for return
+        # it's the home room (both already stored as current_position).
+        return staff.current_position.room
 
     last_idx = 0
     for i, t in enumerate(hop_times):
-        if elapsed_minutes >= t:
+        if elapsed_sim_minutes >= t:
             last_idx = i
         else:
             break
