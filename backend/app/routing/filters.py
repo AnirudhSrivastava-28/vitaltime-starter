@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from app.routing import eta
 from app.routing.constants import QUAL_RANK, RESPONSE_WINDOWS, TIER_REQUIRED_QUAL
-from app.routing.eta import eta_minutes
 from app.routing.fatigue import compute_fatigue
 from app.routing.models import Candidate, Event, Staff
 
@@ -16,10 +16,16 @@ def meets_qualification(staff: Staff, tier: int) -> bool:
     return QUAL_RANK[staff.qualification_level] >= QUAL_RANK[required]
 
 
-def is_time_feasible(staff: Staff, event: Event) -> tuple[bool, float]:
-    eta = eta_minutes(staff.current_position.room, event.room)
+def is_time_feasible(staff: Staff, event: Event, now: datetime) -> tuple[bool, float]:
+    """Feasibility and ETA computed from the staff member's *true current
+    position* — resolve_room() accounts for staff still mid-transit toward
+    a prior destination, rather than trusting a pre-committed room they
+    haven't physically reached yet."""
+    origin = eta.resolve_room(staff, now)
+    _, hop_times = eta.shortest_path(origin, event.room)
+    travel_minutes = hop_times[-1]
     window = RESPONSE_WINDOWS[event.tier]
-    return eta <= window, eta
+    return travel_minutes <= window, travel_minutes
 
 
 def is_available_for_tier(staff: Staff, tier: int) -> bool:
@@ -51,7 +57,7 @@ def build_candidates(
         if not meets_qualification(staff, event.tier):
             continue
 
-        feasible, eta = is_time_feasible(staff, event)
+        feasible, eta_val = is_time_feasible(staff, event, now)
         if not feasible:
             continue
 
@@ -65,7 +71,7 @@ def build_candidates(
 
         fatigue = compute_fatigue(staff.shift_start, staff.task_history, now)
         candidates.append(
-            Candidate(staff=staff, eta=eta, fatigue=fatigue, interruptible=interruptible)
+            Candidate(staff=staff, eta=eta_val, fatigue=fatigue, interruptible=interruptible)
         )
 
     return candidates
