@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.routing import engine, store
 from app.routing.models import Staff
+from app.routing.store import DEMO_TIME_SCALE, sim_minutes_to_real_seconds
 
 router = APIRouter(tags=["routing"])
 
@@ -35,9 +36,11 @@ class StaffPositionResponse(BaseModel):
 
 class TransitPlanResponse(BaseModel):
     path: list[str]
-    hop_times: list[float]        # cumulative minutes-from-departure at each path index
+    hop_times: list[float]              # cumulative SIM minutes (for backwards compat)
+    hop_durations_seconds: list[float]  # cumulative REAL wall-clock seconds (client uses these)
     departure_time: datetime
     arrival_time: datetime
+    mode: Literal["outbound", "return"]
 
 
 class StaffPositionItem(BaseModel):
@@ -46,6 +49,7 @@ class StaffPositionItem(BaseModel):
     qualification_level: str
     shift_start: datetime
     current_position: StaffPositionResponse
+    home_room: str
     status: str
     current_event_id: Optional[str]
     hours_in_shift: float
@@ -61,6 +65,7 @@ class EventItem(BaseModel):
     status: Literal["pending", "assigned", "resolved", "escalated"]
     assigned_staff_id: Optional[str]
     submitted_at: datetime
+    tending_until: Optional[datetime] = None
 
 
 class ClearAssignmentRequest(BaseModel):
@@ -73,17 +78,31 @@ class ClearAssignmentResponse(BaseModel):
     reassigned_pending: Optional[RouteEventResponse] = None
 
 
+class DemoConfigResponse(BaseModel):
+    """Timing metadata the client uses to interpret timestamps.
+    Exposing this makes the animation resilient to future scale changes —
+    the frontend never hardcodes the multiplier."""
+    time_scale: float
+    poll_interval_ms: int = 1500
+
+
 def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
     from app.routing.fatigue import compute_fatigue, hours_in_shift
 
     transit_resp = None
     if staff.transit is not None:
-        arrival = staff.transit.departure_time + timedelta(minutes=staff.transit.hop_times[-1])
+        total_sim_minutes = staff.transit.hop_times[-1]
+        total_real_seconds = sim_minutes_to_real_seconds(total_sim_minutes)
+        arrival = staff.transit.departure_time + timedelta(seconds=total_real_seconds)
         transit_resp = TransitPlanResponse(
             path=staff.transit.path,
             hop_times=staff.transit.hop_times,
+            hop_durations_seconds=[
+                sim_minutes_to_real_seconds(t) for t in staff.transit.hop_times
+            ],
             departure_time=staff.transit.departure_time,
             arrival_time=arrival,
+            mode=staff.transit.mode,
         )
 
     return StaffPositionItem(
@@ -92,12 +111,18 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
         qualification_level=staff.qualification_level,
         shift_start=staff.shift_start,
         current_position=StaffPositionResponse(room=staff.current_position.room),
+        home_room=staff.home_room,
         status=staff.status,
         current_event_id=staff.current_event_id,
         hours_in_shift=hours_in_shift(staff.shift_start, now),
         fatigue_score=compute_fatigue(staff.shift_start, staff.task_history, now),
         transit=transit_resp,
     )
+
+
+@router.get("/demo-config", response_model=DemoConfigResponse)
+async def demo_config() -> DemoConfigResponse:
+    return DemoConfigResponse(time_scale=DEMO_TIME_SCALE)
 
 
 @router.post("/route-event", response_model=RouteEventResponse)
@@ -120,6 +145,9 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
 @router.get("/staff-positions", response_model=list[StaffPositionItem])
 async def staff_positions() -> list[StaffPositionItem]:
     now = datetime.utcnow()
+    # store.all_staff() advances the sim internally, so the snapshot we
+    # return is guaranteed to reflect any transits/tending/returns that
+    # should have completed by `now`.
     return [_staff_to_response(s, now) for s in store.all_staff()]
 
 
@@ -135,6 +163,7 @@ async def list_events() -> list[EventItem]:
             status=e.status,
             assigned_staff_id=e.assigned_staff_id,
             submitted_at=e.submitted_at,
+            tending_until=e.tending_until,
         )
         for e in events
     ]
