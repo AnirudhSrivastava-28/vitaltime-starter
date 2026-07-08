@@ -54,6 +54,32 @@ class ClearAssignmentResponse(BaseModel):
     status: Literal["resolved"]
     reassigned_pending: Optional[RouteEventResponse] = None
 
+class EventItem(BaseModel):
+    event_id: str
+    room: str
+    tier: int
+    symptom_tags: list[str]
+    status: Literal["pending", "assigned", "resolved", "escalated"]
+    assigned_staff_id: Optional[str]
+    submitted_at: datetime
+
+
+@router.get("/events", response_model=list[EventItem])
+async def list_events() -> list[EventItem]:
+    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
+    return [
+        EventItem(
+            event_id=e.event_id,
+            room=e.room,
+            tier=e.tier,
+            symptom_tags=e.symptom_tags,
+            status=e.status,
+            assigned_staff_id=e.assigned_staff_id,
+            submitted_at=e.submitted_at,
+        )
+        for e in events
+    ]
+
 
 def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
     from app.routing.fatigue import compute_fatigue, hours_in_shift
