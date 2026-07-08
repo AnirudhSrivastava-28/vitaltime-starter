@@ -660,7 +660,10 @@ function renderStaffRoster(staff) {
 }
 
 let pollFailures = 0;
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return; // avoid overlapping requests resolving out of order
+  pollInFlight = true;
   try {
     const [staff, events] = await Promise.all([
       fetchJSON("/staff-positions"),
@@ -678,6 +681,8 @@ async function poll() {
     document.getElementById("conn-status").textContent =
       pollFailures > 2 ? "connection lost" : "reconnecting…";
     document.getElementById("pulse-mark").style.background = "var(--tier1)";
+  } finally {
+    pollInFlight = false;
   }
 }
 poll();
