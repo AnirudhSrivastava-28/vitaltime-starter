@@ -27,9 +27,7 @@
     --font-label: 'IBM Plex Sans', sans-serif;
     --font-data: 'IBM Plex Mono', monospace;
   }
-
   * { box-sizing: border-box; }
-
   body {
     margin: 0;
     background: var(--bg-void);
@@ -37,7 +35,6 @@
     font-family: var(--font-label);
     -webkit-font-smoothing: antialiased;
   }
-
   .console {
     display: grid;
     grid-template-columns: 1fr;
@@ -55,40 +52,28 @@
     flex-wrap: wrap;
     gap: 12px;
   }
-  .topbar .brand {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
+  .topbar .brand { display: flex; align-items: baseline; gap: 10px; }
   .topbar .brand .mark {
     width: 8px; height: 8px;
     border-radius: 50%;
     background: var(--tier3);
     display: inline-block;
     box-shadow: 0 0 0 4px var(--tier3-dim);
+    transition: background 0.4s;
   }
   .topbar h1 {
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    margin: 0;
+    font-size: 15px; font-weight: 600;
+    letter-spacing: 0.02em; margin: 0;
   }
-  .topbar .subtitle {
-    font-size: 12px;
-    color: var(--ink-muted);
-  }
+  .topbar .subtitle { font-size: 12px; color: var(--ink-muted); }
   .topbar .right {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    font-family: var(--font-data);
-    font-size: 12px;
+    display: flex; align-items: center; gap: 18px;
+    font-family: var(--font-data); font-size: 12px;
     color: var(--ink-muted);
   }
   .topbar button {
     font-family: var(--font-label);
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 12px; font-weight: 500;
     background: transparent;
     border: 1px solid var(--line);
     color: var(--ink-muted);
@@ -97,18 +82,12 @@
     cursor: pointer;
     transition: border-color 0.15s, color 0.15s;
   }
-  .topbar button:hover {
-    border-color: var(--tier1);
-    color: var(--tier1);
-  }
-  .topbar select {
+  .topbar button:hover { border-color: var(--tier1); color: var(--tier1); }
+  #sim-scale-tag {
     font-family: var(--font-data);
-    font-size: 11px;
-    background: var(--bg-panel-raised);
-    border: 1px solid var(--line);
-    color: var(--ink);
-    padding: 5px 8px;
-    border-radius: 6px;
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    letter-spacing: 0.04em;
   }
 
   /* ---------- tier legend strip ---------- */
@@ -120,6 +99,7 @@
     font-size: 11px;
     color: var(--ink-muted);
     font-family: var(--font-data);
+    flex-wrap: wrap;
   }
   .legend .item { display: flex; align-items: center; gap: 6px; }
   .legend .dot { width: 7px; height: 7px; border-radius: 50%; }
@@ -135,16 +115,13 @@
   @media (max-width: 1050px) {
     .body-grid { grid-template-columns: 1fr; }
   }
-
   .panel {
     background: var(--bg-panel);
     padding: 20px 22px;
     overflow-y: auto;
   }
-
   .panel-title {
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 11px; font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--ink-muted);
@@ -160,39 +137,54 @@
   }
   .ns-label {
     font-family: var(--font-data);
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 11px; font-weight: 600;
     fill: var(--ink);
   }
   .edge-line { stroke: var(--line); stroke-width: 1.5; }
   .room-core { fill: var(--bg-panel-raised); stroke: var(--ink-faint); stroke-width: 1.5; }
-  .ns-core { fill: var(--bg-panel-raised); stroke: var(--role-rn); stroke-width: 1.5; }
+  .ns-core   { fill: var(--bg-panel-raised); stroke: var(--role-rn); stroke-width: 1.5; }
+
+  /* Halo: opacity + stroke color are updated in place, never cleared/recreated.
+     CSS transitions handle the fade smoothly regardless of poll cadence. */
   .room-halo {
     opacity: 0;
-    transition: opacity 0.3s ease;
+    stroke: transparent;
+    transition: opacity 0.5s ease, stroke 0.3s ease;
   }
   .room-halo.pulse { animation: pulse-ring 1.6s ease-out infinite; }
   @keyframes pulse-ring {
-    0%   { r: 24; opacity: 0.55; }
-    100% { r: 42; opacity: 0; }
+    0%   { r: 26; }
+    100% { r: 44; }
   }
+
   .staff-chip {
     font-family: var(--font-data);
-    font-size: 9px;
-    font-weight: 600;
+    font-size: 9px; font-weight: 600;
     fill: var(--bg-void);
+    pointer-events: none;
   }
   .staff-chip-bg { stroke: var(--bg-panel); stroke-width: 1.5; }
-  .staff-chip-bg.busy { animation: chip-breathe 1.4s ease-in-out infinite; }
-  @keyframes chip-breathe {
-    0%, 100% { stroke-width: 1.5; }
-    50% { stroke-width: 3; }
+  .staff-chip-bg.busy { stroke: var(--tier1); stroke-width: 2; }
+
+  /* Tending ring — visible only when phase = tending */
+  .tending-ring {
+    fill: none;
+    stroke-width: 2;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  .tending-ring.active {
+    opacity: 0.85;
+    animation: tending-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes tending-pulse {
+    0%, 100% { r: 15; opacity: 0.35; }
+    50%      { r: 20; opacity: 0.85; }
   }
 
   /* ---------- event feed ---------- */
   .event-row {
-    display: flex;
-    gap: 12px;
+    display: flex; gap: 12px;
     padding: 11px 0;
     border-bottom: 1px solid var(--line);
     align-items: flex-start;
@@ -202,39 +194,27 @@
     flex-shrink: 0;
     width: 30px; height: 30px;
     border-radius: 7px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    display: flex; align-items: center; justify-content: center;
     font-family: var(--font-data);
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 13px; font-weight: 600;
   }
   .tier-badge.t1 { background: var(--tier1-dim); color: var(--tier1); }
   .tier-badge.t2 { background: var(--tier2-dim); color: var(--tier2); }
   .tier-badge.t3 { background: var(--tier3-dim); color: var(--tier3); }
   .event-main { flex: 1; min-width: 0; }
   .event-top-line {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
+    display: flex; justify-content: space-between; gap: 8px;
     font-size: 13px;
   }
   .event-room { font-weight: 600; }
   .event-time {
     font-family: var(--font-data);
-    font-size: 11px;
-    color: var(--ink-faint);
+    font-size: 11px; color: var(--ink-faint);
     white-space: nowrap;
   }
-  .event-tags {
-    font-size: 11.5px;
-    color: var(--ink-muted);
-    margin-top: 2px;
-  }
+  .event-tags { font-size: 11.5px; color: var(--ink-muted); margin-top: 2px; }
   .event-status-line {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    display: flex; align-items: center; gap: 6px;
     margin-top: 5px;
     font-family: var(--font-data);
     font-size: 11px;
@@ -245,9 +225,10 @@
     font-size: 10px;
     letter-spacing: 0.03em;
   }
-  .status-pill.assigned { background: #4FA98A20; color: var(--tier3); }
-  .status-pill.pending { background: #E0A72E20; color: var(--tier2); }
-  .status-pill.resolved { background: #ffffff10; color: var(--ink-faint); }
+  .status-pill.assigned  { background: #4FA98A20; color: var(--tier3); }
+  .status-pill.tending   { background: #E0A72E20; color: var(--tier2); }
+  .status-pill.pending   { background: #E0A72E20; color: var(--tier2); }
+  .status-pill.resolved  { background: #ffffff10; color: var(--ink-faint); }
   .status-pill.escalated { background: #E23D4520; color: var(--tier1); }
 
   .empty-state {
@@ -263,12 +244,7 @@
     border-bottom: 1px solid var(--line);
   }
   .staff-row:last-child { border-bottom: none; }
-  .staff-top-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-  }
+  .staff-top-line { display: flex; align-items: center; gap: 8px; font-size: 13px; }
   .role-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .staff-id { font-family: var(--font-data); font-weight: 500; }
   .staff-room {
@@ -278,24 +254,28 @@
     color: var(--ink-muted);
   }
   .staff-meta {
-    display: flex;
-    justify-content: space-between;
+    display: flex; justify-content: space-between;
     font-family: var(--font-data);
     font-size: 10.5px;
     color: var(--ink-muted);
     margin-top: 6px;
   }
+  .staff-phase {
+    font-family: var(--font-data);
+    font-size: 10px;
+    color: var(--ink-faint);
+    margin-top: 3px;
+    letter-spacing: 0.03em;
+  }
   .fatigue-track {
-    width: 100%;
-    height: 4px;
+    width: 100%; height: 4px;
     background: var(--line);
     border-radius: 2px;
     margin-top: 7px;
     overflow: hidden;
   }
   .fatigue-fill {
-    height: 100%;
-    border-radius: 2px;
+    height: 100%; border-radius: 2px;
     background: var(--tier3);
     transition: width 0.4s ease, background 0.4s ease;
   }
@@ -330,18 +310,11 @@
       <span class="subtitle">Dispatch Console</span>
     </div>
     <div class="right">
-      <label for="speed-select" style="color:var(--ink-faint)">playback</label>
-      <select id="speed-select">
-        <option value="1">1×  (real time)</option>
-        <option value="2">2×</option>
-        <option value="5">5×</option>
-        <option value="10">10×</option>
-      </select>
+      <span id="sim-scale-tag">sim × --</span>
       <span id="clock">--:--:--</span>
       <span id="conn-status">connecting…</span>
       <button id="reset-btn">Reset simulation</button>
     </div>
-
   </div>
 
   <div class="legend">
@@ -358,25 +331,22 @@
       <p class="panel-title">Facility Map</p>
       <div id="map-svg-holder"></div>
     </div>
-
     <div class="panel">
       <p class="panel-title">Live Events</p>
       <div id="event-feed"></div>
     </div>
-
     <div class="panel">
       <p class="panel-title">Staff Roster</p>
       <div id="staff-roster"></div>
     </div>
   </div>
-
 </div>
 
 <script>
-/* ---------------------------------------------------------------------
-   Facility graph — mirrors backend/app/routing/eta.py exactly.
+/* =========================================================================
+   Facility graph — MUST mirror backend/app/routing/eta.py's _FACILITY_EDGES.
    Layout is schematic (subway-map style), not to scale.
---------------------------------------------------------------------- */
+   ========================================================================= */
 const ROOM_COORDS = {
   "NS":  { x: 60,  y: 40 },
   "101": { x: 120, y: 120 },
@@ -396,18 +366,16 @@ const EDGES = [
   ["105","106"], ["106","107"], ["107","108"], ["108","109"], ["109","110"],
   ["102","106"], ["103","107"], ["104","108"],
 ];
-const TIER_COLOR = { 1: "var(--tier1)", 2: "var(--tier2)", 3: "var(--tier3)" };
-const ROLE_COLOR = { RN: "var(--role-rn)", LPN: "var(--role-lpn)", CNA: "var(--role-cna)" };
+const TIER_COLOR = { 1: "#E23D45", 2: "#E0A72E", 3: "#4FA98A" };
+const ROLE_COLOR = { RN: "#6C8EF5", LPN: "#B98CE0", CNA: "#58C4D6" };
 
 function buildMapSVG() {
   const w = 1000, h = 360;
   let svg = `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">`;
-
   EDGES.forEach(([a, b]) => {
     const pa = ROOM_COORDS[a], pb = ROOM_COORDS[b];
     svg += `<line class="edge-line" x1="${pa.x}" y1="${pa.y}" x2="${pb.x}" y2="${pb.y}" />`;
   });
-
   Object.entries(ROOM_COORDS).forEach(([room, p]) => {
     const isNS = room === "NS";
     const r = isNS ? 18 : 24;
@@ -417,22 +385,17 @@ function buildMapSVG() {
     svg += `<text class="${isNS ? 'ns-label' : 'room-label'}" x="${p.x}" y="${p.y - r - 8}" text-anchor="middle">${room}</text>`;
     svg += `</g>`;
   });
-
-  // One persistent layer for staff chips — chips are created once and
-  // repositioned every animation frame, never rebuilt from scratch.
-  // Rebuilding on every poll is what caused teleporting before.
   svg += `<g id="chips-layer"></g>`;
-
   svg += `</svg>`;
   document.getElementById("map-svg-holder").innerHTML = svg;
 }
 buildMapSVG();
 
-/* ---------------------------------------------------------------------
-   Time helper — backend serializes naive UTC datetimes with no "Z" or
-   offset. new Date() on such a string is parsed as *local* time per
-   spec, which silently corrupts elapsed-time math. Force UTC parsing.
---------------------------------------------------------------------- */
+/* =========================================================================
+   Time — backend sends naive UTC datetimes (no "Z"). JS's Date() would
+   parse those as local time, silently corrupting elapsed-time math.
+   Force UTC parsing.
+   ========================================================================= */
 function parseUTC(iso) {
   if (!iso) return null;
   const hasTZ = /Z$|[+-]\d\d:\d\d$/.test(iso);
@@ -447,46 +410,34 @@ function timeAgo(iso) {
   return `${Math.round(secs / 3600)}h ago`;
 }
 
-/* ---------------------------------------------------------------------
-   Polling loop — fetches truth from the backend on an interval.
-   Rendering staff positions is NOT done here; see the render loop below.
---------------------------------------------------------------------- */
-const POLL_MS = 1500;
-const FATIGUE_DISPLAY_MAX = 55; // visual normalization only, not a backend constant
-
-let speedMultiplier = 1;
-document.getElementById("speed-select").addEventListener("change", (e) => {
-  speedMultiplier = Number(e.target.value);
-});
-
-async function fetchJSON(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
-  return res.json();
-}
-
-/* ---------------------------------------------------------------------
+/* =========================================================================
    Dead-reckoning render loop.
 
-   Every staff member's transit (path + cumulative hop_times + real
-   departure_time) comes straight from the backend's actual routing
-   decision (app/routing/eta.py's shortest_path, the same function used
-   to filter/score candidates) — the client never invents or guesses a
-   route. Position on screen is a pure function of wall-clock elapsed
-   time against that plan, recomputed every animation frame. There is no
-   teleport: a staff member with no transit (already arrived, or never
-   moved) simply renders at their current room.
---------------------------------------------------------------------- */
-let latestStaff = [];
+   Backend sends each transit's `hop_durations_seconds` — cumulative REAL
+   wall-clock seconds from `departure_time` to the end of each segment,
+   already scaled by DEMO_TIME_SCALE. The client never scales anything.
 
-function interpolateOnPath(path, hopTimes, elapsedMinutes) {
-  const total = hopTimes[hopTimes.length - 1];
-  if (elapsedMinutes <= 0) return ROOM_COORDS[path[0]];
-  if (elapsedMinutes >= total) return ROOM_COORDS[path[path.length - 1]];
-  for (let i = 0; i < hopTimes.length - 1; i++) {
-    const segStart = hopTimes[i], segEnd = hopTimes[i + 1];
-    if (elapsedMinutes >= segStart && elapsedMinutes <= segEnd) {
-      const t = segEnd > segStart ? (elapsedMinutes - segStart) / (segEnd - segStart) : 1;
+   Position on screen is a pure function of (Date.now() - departure_time)
+   against those durations. Recomputed every animation frame. No easing,
+   no client-side speed multiplier, no state — just interpolation.
+
+   Backend state transitions (arrival → tending starts, tending done →
+   resolve → return begins, return done → idle) happen at the same real
+   timestamps the client is interpolating against, so backend truth and
+   frontend animation stay in perfect sync by construction.
+   ========================================================================= */
+let latestStaff = [];
+let latestEvents = [];
+const eventsById = () => Object.fromEntries(latestEvents.map(e => [e.event_id, e]));
+
+function interpolateOnPath(path, durationsSeconds, elapsedSeconds) {
+  const total = durationsSeconds[durationsSeconds.length - 1];
+  if (elapsedSeconds <= 0) return ROOM_COORDS[path[0]];
+  if (elapsedSeconds >= total) return ROOM_COORDS[path[path.length - 1]];
+  for (let i = 0; i < durationsSeconds.length - 1; i++) {
+    const segStart = durationsSeconds[i], segEnd = durationsSeconds[i + 1];
+    if (elapsedSeconds >= segStart && elapsedSeconds <= segEnd) {
+      const t = segEnd > segStart ? (elapsedSeconds - segStart) / (segEnd - segStart) : 1;
       const a = ROOM_COORDS[path[i]], b = ROOM_COORDS[path[i + 1]];
       return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
     }
@@ -494,23 +445,43 @@ function interpolateOnPath(path, hopTimes, elapsedMinutes) {
   return ROOM_COORDS[path[path.length - 1]];
 }
 
-function positionFor(s) {
-  if (s.transit) {
-    const departureMs = parseUTC(s.transit.departure_time).getTime();
-    const elapsedMinutes = ((Date.now() - departureMs) / 60000) * speedMultiplier;
-    const totalMinutes = s.transit.hop_times[s.transit.hop_times.length - 1];
-    if (elapsedMinutes < totalMinutes) {
-      return { pos: interpolateOnPath(s.transit.path, s.transit.hop_times, elapsedMinutes), inTransit: true };
+/* Phase resolution — pure function of staff+events+now, matches backend. */
+function resolvePhase(s, byId) {
+  //   outbound        transit set,   mode=outbound, now < arrival
+  //   tending         transit set,   mode=outbound, now >= arrival (event.status = "assigned")
+  //   returning       transit set,   mode=return
+  //   idle            no transit
+  if (!s.transit) return { phase: "idle", pos: ROOM_COORDS[s.current_position.room] };
+
+  const departureMs = parseUTC(s.transit.departure_time).getTime();
+  const arrivalMs = parseUTC(s.transit.arrival_time).getTime();
+  const elapsedSec = (Date.now() - departureMs) / 1000;
+  const durations = s.transit.hop_durations_seconds;
+  const totalSec = durations[durations.length - 1];
+
+  if (s.transit.mode === "return") {
+    if (Date.now() < arrivalMs) {
+      return { phase: "returning", pos: interpolateOnPath(s.transit.path, durations, elapsedSec) };
     }
+    return { phase: "idle", pos: ROOM_COORDS[s.current_position.room] };
   }
-  return { pos: ROOM_COORDS[s.current_position.room], inTransit: false };
+
+  // outbound
+  if (Date.now() < arrivalMs) {
+    return { phase: "transit", pos: interpolateOnPath(s.transit.path, durations, elapsedSec) };
+  }
+  // Arrived. Are we tending?
+  const evt = s.current_event_id ? byId[s.current_event_id] : null;
+  const tier = evt ? evt.tier : null;
+  return { phase: "tending", pos: ROOM_COORDS[s.transit.path[s.transit.path.length - 1]], tier };
 }
 
 function ensureChip(staffId, role) {
   if (document.querySelector(`[data-staff="${staffId}"]`)) return;
   const layer = document.getElementById("chips-layer");
-  const color = ROLE_COLOR[role] || "var(--ink-muted)";
+  const color = ROLE_COLOR[role] || "#7C8598";
   layer.insertAdjacentHTML("beforeend", `
+    <circle class="tending-ring" data-ring="${staffId}" r="15" />
     <circle class="staff-chip-bg" data-staff="${staffId}" r="11" fill="${color}" />
     <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3">${staffId.split("-")[0]}</text>
   `);
@@ -519,35 +490,41 @@ function ensureChip(staffId, role) {
 function renderFrame() {
   requestAnimationFrame(renderFrame);
   if (!latestStaff.length) return;
+  const byId = eventsById();
 
-  const resolved = latestStaff.map(s => ({ s, ...positionFor(s) }));
+  const resolved = latestStaff.map(s => ({ s, ...resolvePhase(s, byId) }));
 
-  // Multiple staff at rest in the same room get a small arc offset so
-  // they don't stack. Only applies to staff who have actually arrived —
-  // someone mid-transit is genuinely between rooms, not "at" one.
-  const arrivedByRoom = {};
-  resolved.forEach(({ s, inTransit }) => {
-    if (!inTransit) {
-      const room = s.current_position.room;
-      (arrivedByRoom[room] = arrivedByRoom[room] || []).push(s.staff_id);
+  // Cluster resting/tending staff by room so overlapping chips fan out.
+  const groupedByRoom = {};
+  resolved.forEach(({ s, phase }) => {
+    if (phase === "idle" || phase === "tending") {
+      const room = phase === "tending"
+        ? s.transit.path[s.transit.path.length - 1]
+        : s.current_position.room;
+      (groupedByRoom[room] = groupedByRoom[room] || []).push(s.staff_id);
     }
   });
 
-  resolved.forEach(({ s, pos, inTransit }) => {
+  resolved.forEach(({ s, phase, pos, tier }) => {
     ensureChip(s.staff_id, s.role);
     let { x, y } = pos;
-    if (!inTransit) {
-      const group = arrivedByRoom[s.current_position.room];
-      const n = group.length;
-      if (n > 1) {
+
+    if (phase === "idle" || phase === "tending") {
+      const room = phase === "tending"
+        ? s.transit.path[s.transit.path.length - 1]
+        : s.current_position.room;
+      const group = groupedByRoom[room];
+      if (group && group.length > 1) {
         const idx = group.indexOf(s.staff_id);
-        const angle = (idx / n) * Math.PI * 2 - Math.PI / 2;
+        const angle = (idx / group.length) * Math.PI * 2 - Math.PI / 2;
         x += Math.cos(angle) * 28;
         y += Math.sin(angle) * 28;
       }
     }
+
     const bg = document.querySelector(`[data-staff="${s.staff_id}"]`);
     const label = document.querySelector(`[data-staff-label="${s.staff_id}"]`);
+    const ring = document.querySelector(`[data-ring="${s.staff_id}"]`);
     if (bg) {
       bg.setAttribute("cx", x);
       bg.setAttribute("cy", y);
@@ -557,25 +534,66 @@ function renderFrame() {
       label.setAttribute("x", x);
       label.setAttribute("y", y + 3);
     }
+    if (ring) {
+      ring.setAttribute("cx", x);
+      ring.setAttribute("cy", y);
+      if (phase === "tending" && tier) {
+        ring.setAttribute("stroke", TIER_COLOR[tier] || "#7C8598");
+        ring.classList.add("active");
+      } else {
+        ring.classList.remove("active");
+      }
+    }
   });
 }
 requestAnimationFrame(renderFrame);
 
+/* =========================================================================
+   Halo rendering — idempotent. Never clears everything and re-adds; only
+   updates existing halos in place. Avoids single-frame flashes even if a
+   poll response is momentarily stale.
+   ========================================================================= */
 function renderRoomHalos(events) {
-  document.querySelectorAll(".room-halo").forEach(el => {
-    el.style.opacity = 0;
-    el.classList.remove("pulse");
-    el.setAttribute("stroke", "transparent");
+  const activeByRoom = {};
+  events.forEach(e => {
+    if (e.status === "assigned" || e.status === "pending") {
+      // Emergency (tier 1) or unassigned pending wins; otherwise highest tier.
+      const cur = activeByRoom[e.room];
+      if (!cur || e.tier < cur.tier) activeByRoom[e.room] = e;
+    }
   });
-  events
-    .filter(e => e.status === "assigned" || e.status === "pending")
-    .forEach(e => {
-      const halo = document.querySelector(`[data-halo="${e.room}"]`);
-      if (!halo) return;
-      halo.setAttribute("stroke", TIER_COLOR[e.tier] || "var(--ink-muted)");
-      halo.style.opacity = 0.7;
-      if (e.tier === 1 || e.status === "pending") halo.classList.add("pulse");
-    });
+
+  document.querySelectorAll(".room-halo").forEach(el => {
+    const room = el.getAttribute("data-halo");
+    const e = activeByRoom[room];
+    if (e) {
+      el.setAttribute("stroke", TIER_COLOR[e.tier] || "#7C8598");
+      el.style.opacity = 0.65;
+      // Pulse only for emergencies or unassigned pending events.
+      if (e.tier === 1 || e.status === "pending") {
+        el.classList.add("pulse");
+      } else {
+        el.classList.remove("pulse");
+      }
+    } else {
+      el.style.opacity = 0;
+      el.classList.remove("pulse");
+    }
+  });
+}
+
+/* =========================================================================
+   Event feed
+   ========================================================================= */
+function displayStatus(e) {
+  // Backend sets tending_until at the moment of arrival. If that timestamp
+  // is set AND still in the future, the nurse has arrived and is tending.
+  // Otherwise fall through to the raw backend status.
+  if (e.status === "assigned" && e.tending_until) {
+    const tendingUntilMs = parseUTC(e.tending_until).getTime();
+    if (Date.now() < tendingUntilMs) return "tending";
+  }
+  return e.status;
 }
 
 function renderEventFeed(events) {
@@ -586,7 +604,9 @@ function renderEventFeed(events) {
   }
   el.innerHTML = events
     .slice(0, 40)
-    .map(e => `
+    .map(e => {
+      const status = displayStatus(e);
+      return `
       <div class="event-row">
         <div class="tier-badge t${e.tier}">T${e.tier}</div>
         <div class="event-main">
@@ -596,13 +616,27 @@ function renderEventFeed(events) {
           </div>
           <div class="event-tags">${e.symptom_tags.join(", ") || "—"}</div>
           <div class="event-status-line">
-            <span class="status-pill ${e.status}">${e.status}</span>
+            <span class="status-pill ${status}">${status}</span>
             ${e.assigned_staff_id ? `<span>&rarr; ${e.assigned_staff_id}</span>` : ""}
           </div>
         </div>
       </div>
-    `)
+    `;
+    })
     .join("");
+}
+
+/* =========================================================================
+   Staff roster
+   ========================================================================= */
+const FATIGUE_DISPLAY_MAX = 55;
+
+function phaseLabel(s, byId) {
+  const p = resolvePhase(s, byId);
+  if (p.phase === "transit") return `en route → Room ${s.transit.path[s.transit.path.length - 1]}`;
+  if (p.phase === "tending") return `tending Room ${s.transit.path[s.transit.path.length - 1]}`;
+  if (p.phase === "returning") return `returning → Room ${s.transit.path[s.transit.path.length - 1]}`;
+  return `at Room ${s.current_position.room}`;
 }
 
 function renderStaffRoster(staff) {
@@ -611,34 +645,34 @@ function renderStaffRoster(staff) {
     el.innerHTML = `<div class="empty-state">No staff data available</div>`;
     return;
   }
+  const byId = eventsById();
   const order = { RN: 0, LPN: 1, CNA: 2 };
   const sorted = [...staff].sort((a, b) =>
     (order[a.role] - order[b.role]) || a.staff_id.localeCompare(b.staff_id)
   );
-  el.innerHTML = sorted
-    .map(s => {
-      const pct = Math.min(100, (s.fatigue_score / FATIGUE_DISPLAY_MAX) * 100);
-      const barColor = pct > 66 ? "var(--tier1)" : pct > 33 ? "var(--tier2)" : "var(--tier3)";
-      return `
-        <div class="staff-row">
-          <div class="staff-top-line">
-            <span class="role-dot" style="background:${ROLE_COLOR[s.role]}"></span>
-            <span class="staff-id">${s.staff_id}</span>
-            ${s.status === "busy" ? `<span class="busy-tag">busy</span>` : ""}
-            <span class="staff-room">${s.current_position.room}</span>
-          </div>
-          <div class="staff-meta">
-            <span>${s.hours_in_shift.toFixed(1)}h in shift</span>
-            <span>fatigue ${s.fatigue_score.toFixed(1)}</span>
-          </div>
-          <div class="fatigue-track"><div class="fatigue-fill" style="width:${pct}%; background:${barColor}"></div></div>
-          ${s.status === "busy" && s.current_event_id
-            ? `<button class="clear-btn" data-event="${s.current_event_id}">Clear assignment</button>`
-            : ""}
+  el.innerHTML = sorted.map(s => {
+    const pct = Math.min(100, (s.fatigue_score / FATIGUE_DISPLAY_MAX) * 100);
+    const barColor = pct > 66 ? "var(--tier1)" : pct > 33 ? "var(--tier2)" : "var(--tier3)";
+    return `
+      <div class="staff-row">
+        <div class="staff-top-line">
+          <span class="role-dot" style="background:${ROLE_COLOR[s.role]}"></span>
+          <span class="staff-id">${s.staff_id}</span>
+          ${s.status === "busy" ? `<span class="busy-tag">busy</span>` : ""}
+          <span class="staff-room">${s.current_position.room}</span>
         </div>
-      `;
-    })
-    .join("");
+        <div class="staff-phase">${phaseLabel(s, byId)}</div>
+        <div class="staff-meta">
+          <span>${s.hours_in_shift.toFixed(1)}h in shift</span>
+          <span>fatigue ${s.fatigue_score.toFixed(1)}</span>
+        </div>
+        <div class="fatigue-track"><div class="fatigue-fill" style="width:${pct}%; background:${barColor}"></div></div>
+        ${s.status === "busy" && s.current_event_id
+          ? `<button class="clear-btn" data-event="${s.current_event_id}">Clear assignment</button>`
+          : ""}
+      </div>
+    `;
+  }).join("");
 
   el.querySelectorAll(".clear-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -659,17 +693,55 @@ function renderStaffRoster(staff) {
   });
 }
 
+/* =========================================================================
+   Polling — with defensive check against multi-worker split-brain.
+
+   If Render is (mis)configured with >1 worker, each worker has its own
+   in-memory state. Polls round-robin between them, so one poll may
+   return the active event and the next may return nothing. That silently
+   masks the real fix (--workers 1) but at least stops the visible loop:
+   a suddenly-empty response after a non-empty one is ignored.
+   ========================================================================= */
+const POLL_MS = 1500;
+
+async function fetchJSON(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  return res.json();
+}
+
 let pollFailures = 0;
 let pollInFlight = false;
+let suspiciousEmptyStreak = 0;
+
 async function poll() {
-  if (pollInFlight) return; // avoid overlapping requests resolving out of order
+  if (pollInFlight) return;
   pollInFlight = true;
   try {
     const [staff, events] = await Promise.all([
       fetchJSON("/staff-positions"),
       fetchJSON("/events"),
     ]);
-    latestStaff = staff; // consumed by the requestAnimationFrame render loop
+
+    // Split-brain defense: if a response returns empty staff or empty
+    // events while the previous one had active state, treat this poll as
+    // suspicious and skip. If it persists (>3 in a row), give up and
+    // accept the empty response — otherwise a legit reset would be stuck.
+    const staffEmpty = !staff || staff.length === 0;
+    const activeEventsPrev = latestEvents.some(e => e.status === "assigned" || e.status === "pending");
+    const eventsEmptyButShouldnt = (events.length === 0) && activeEventsPrev;
+    if ((staffEmpty && latestStaff.length > 0) || eventsEmptyButShouldnt) {
+      suspiciousEmptyStreak += 1;
+      if (suspiciousEmptyStreak <= 3) {
+        console.warn("VitalTime: suspicious empty poll response, skipping. If this recurs, check that Render is running --workers 1.");
+        return;
+      }
+    } else {
+      suspiciousEmptyStreak = 0;
+    }
+
+    latestStaff = staff;
+    latestEvents = events;
     renderRoomHalos(events);
     renderEventFeed(events);
     renderStaffRoster(staff);
@@ -685,20 +757,34 @@ async function poll() {
     pollInFlight = false;
   }
 }
-poll();
-setInterval(poll, POLL_MS);
 
-/* clock */
+/* =========================================================================
+   Boot
+   ========================================================================= */
+async function bootstrap() {
+  try {
+    const cfg = await fetchJSON("/demo-config");
+    document.getElementById("sim-scale-tag").textContent = `sim × ${cfg.time_scale}`;
+  } catch (err) {
+    document.getElementById("sim-scale-tag").textContent = "sim × ?";
+  }
+  poll();
+  setInterval(poll, POLL_MS);
+}
+bootstrap();
+
 function tickClock() {
   document.getElementById("clock").textContent = new Date().toLocaleTimeString();
 }
 tickClock();
 setInterval(tickClock, 1000);
 
-/* reset */
 document.getElementById("reset-btn").addEventListener("click", async () => {
   if (!confirm("Reset the simulation? This clears all staff assignments and event history.")) return;
   await fetchJSON("/reset-simulation", { method: "POST" });
+  latestStaff = [];
+  latestEvents = [];
+  suspiciousEmptyStreak = 999; // force acceptance of the resulting empty response
   await poll();
 });
 </script>
