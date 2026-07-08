@@ -165,6 +165,14 @@
   }
   .staff-chip-bg { stroke: var(--bg-panel); stroke-width: 1.5; }
   .staff-chip-bg.busy { stroke: var(--tier1); stroke-width: 2; }
+  .phase-tag {
+    font-family: var(--font-data);
+    font-size: 8px;
+    letter-spacing: 0.04em;
+    fill: var(--ink-faint);
+    pointer-events: none;
+    text-transform: uppercase;
+  }
 
   /* Tending ring — visible only when phase = tending */
   .tending-ring {
@@ -484,6 +492,7 @@ function ensureChip(staffId, role) {
     <circle class="tending-ring" data-ring="${staffId}" r="15" />
     <circle class="staff-chip-bg" data-staff="${staffId}" r="11" fill="${color}" />
     <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3">${staffId.split("-")[0]}</text>
+    <text class="phase-tag" data-phase-tag="${staffId}" text-anchor="middle"></text>
   `);
 }
 
@@ -525,6 +534,7 @@ function renderFrame() {
     const bg = document.querySelector(`[data-staff="${s.staff_id}"]`);
     const label = document.querySelector(`[data-staff-label="${s.staff_id}"]`);
     const ring = document.querySelector(`[data-ring="${s.staff_id}"]`);
+    const phaseTag = document.querySelector(`[data-phase-tag="${s.staff_id}"]`);
     if (bg) {
       bg.setAttribute("cx", x);
       bg.setAttribute("cy", y);
@@ -543,6 +553,11 @@ function renderFrame() {
       } else {
         ring.classList.remove("active");
       }
+    }
+    if (phaseTag) {
+      phaseTag.setAttribute("x", x);
+      phaseTag.setAttribute("y", y - 20);
+      phaseTag.textContent = phase !== "idle" ? phase : "";
     }
   });
 }
@@ -694,13 +709,24 @@ function renderStaffRoster(staff) {
 }
 
 /* =========================================================================
-   Polling — with defensive check against multi-worker split-brain.
+   Polling — with defensive checks against multi-worker split-brain.
 
    If Render is (mis)configured with >1 worker, each worker has its own
-   in-memory state. Polls round-robin between them, so one poll may
-   return the active event and the next may return nothing. That silently
-   masks the real fix (--workers 1) but at least stops the visible loop:
-   a suddenly-empty response after a non-empty one is ignored.
+   in-memory state. Polls round-robin between them. Two distinct symptoms:
+
+   1. A response that's empty when the last one wasn't (event/staff list
+      wiped) — caught by the emptiness check below.
+   2. A worse variant: a NON-empty response where a specific staff member
+      reports idle at their home room, because that worker's copy of them
+      was never touched by the original assignment at all. This is what
+      produces "nurse arrives, then appears back at NS" — it's not really
+      snapping back, it's a different worker's untouched seed data being
+      served for that one poll. Caught by the timing check below: if a
+      staff member was busy with a known tending/arrival deadline still in
+      the future, and suddenly reports idle before that deadline, the
+      response is rejected.
+
+   Both are pure masking. The actual fix is running Render with 1 worker.
    ========================================================================= */
 const POLL_MS = 1500;
 
@@ -710,9 +736,24 @@ async function fetchJSON(path, opts) {
   return res.json();
 }
 
+function expectedBusyUntilMs(staff, prevEventsById) {
+  // Returns a timestamp before which this staff member should NOT
+  // legitimately be able to report idle — or null if we can't tell.
+  if (staff.status !== "busy" || !staff.transit) return null;
+  if (staff.transit.mode === "outbound") {
+    const evt = staff.current_event_id ? prevEventsById[staff.current_event_id] : null;
+    if (evt && evt.tending_until) return parseUTC(evt.tending_until).getTime();
+    return parseUTC(staff.transit.arrival_time).getTime();
+  }
+  if (staff.transit.mode === "return") {
+    return parseUTC(staff.transit.arrival_time).getTime();
+  }
+  return null;
+}
+
 let pollFailures = 0;
 let pollInFlight = false;
-let suspiciousEmptyStreak = 0;
+let suspiciousStreak = 0;
 
 async function poll() {
   if (pollInFlight) return;
@@ -723,21 +764,34 @@ async function poll() {
       fetchJSON("/events"),
     ]);
 
-    // Split-brain defense: if a response returns empty staff or empty
-    // events while the previous one had active state, treat this poll as
-    // suspicious and skip. If it persists (>3 in a row), give up and
-    // accept the empty response — otherwise a legit reset would be stuck.
+    const prevEventsById = eventsById();
     const staffEmpty = !staff || staff.length === 0;
     const activeEventsPrev = latestEvents.some(e => e.status === "assigned" || e.status === "pending");
     const eventsEmptyButShouldnt = (events.length === 0) && activeEventsPrev;
-    if ((staffEmpty && latestStaff.length > 0) || eventsEmptyButShouldnt) {
-      suspiciousEmptyStreak += 1;
-      if (suspiciousEmptyStreak <= 3) {
-        console.warn("VitalTime: suspicious empty poll response, skipping. If this recurs, check that Render is running --workers 1.");
+
+    let prematureIdle = false;
+    for (const prev of latestStaff) {
+      const deadline = expectedBusyUntilMs(prev, prevEventsById);
+      if (deadline === null || Date.now() >= deadline - 400) continue;
+      const now_ = staff.find(s => s.staff_id === prev.staff_id);
+      if (now_ && now_.status !== "busy" && !now_.transit) {
+        prematureIdle = true;
+        break;
+      }
+    }
+
+    if ((staffEmpty && latestStaff.length > 0) || eventsEmptyButShouldnt || prematureIdle) {
+      suspiciousStreak += 1;
+      if (suspiciousStreak <= 3) {
+        console.warn(
+          "VitalTime: suspicious poll response (",
+          prematureIdle ? "premature-idle" : "empty-regression",
+          "), skipping. If this recurs, confirm Render is running --workers 1."
+        );
         return;
       }
     } else {
-      suspiciousEmptyStreak = 0;
+      suspiciousStreak = 0;
     }
 
     latestStaff = staff;
@@ -784,7 +838,7 @@ document.getElementById("reset-btn").addEventListener("click", async () => {
   await fetchJSON("/reset-simulation", { method: "POST" });
   latestStaff = [];
   latestEvents = [];
-  suspiciousEmptyStreak = 999; // force acceptance of the resulting empty response
+  suspiciousStreak = 999; // force acceptance of the resulting empty response
   await poll();
 });
 </script>
