@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -33,6 +33,13 @@ class StaffPositionResponse(BaseModel):
     room: str
 
 
+class TransitPlanResponse(BaseModel):
+    path: list[str]
+    hop_times: list[float]        # cumulative minutes-from-departure at each path index
+    departure_time: datetime
+    arrival_time: datetime
+
+
 class StaffPositionItem(BaseModel):
     staff_id: str
     role: str
@@ -43,16 +50,8 @@ class StaffPositionItem(BaseModel):
     current_event_id: Optional[str]
     hours_in_shift: float
     fatigue_score: float
+    transit: Optional[TransitPlanResponse] = None
 
-
-class ClearAssignmentRequest(BaseModel):
-    event_id: str
-
-
-class ClearAssignmentResponse(BaseModel):
-    event_id: str
-    status: Literal["resolved"]
-    reassigned_pending: Optional[RouteEventResponse] = None
 
 class EventItem(BaseModel):
     event_id: str
@@ -64,25 +63,28 @@ class EventItem(BaseModel):
     submitted_at: datetime
 
 
-@router.get("/events", response_model=list[EventItem])
-async def list_events() -> list[EventItem]:
-    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
-    return [
-        EventItem(
-            event_id=e.event_id,
-            room=e.room,
-            tier=e.tier,
-            symptom_tags=e.symptom_tags,
-            status=e.status,
-            assigned_staff_id=e.assigned_staff_id,
-            submitted_at=e.submitted_at,
-        )
-        for e in events
-    ]
+class ClearAssignmentRequest(BaseModel):
+    event_id: str
+
+
+class ClearAssignmentResponse(BaseModel):
+    event_id: str
+    status: Literal["resolved"]
+    reassigned_pending: Optional[RouteEventResponse] = None
 
 
 def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
     from app.routing.fatigue import compute_fatigue, hours_in_shift
+
+    transit_resp = None
+    if staff.transit is not None:
+        arrival = staff.transit.departure_time + timedelta(minutes=staff.transit.hop_times[-1])
+        transit_resp = TransitPlanResponse(
+            path=staff.transit.path,
+            hop_times=staff.transit.hop_times,
+            departure_time=staff.transit.departure_time,
+            arrival_time=arrival,
+        )
 
     return StaffPositionItem(
         staff_id=staff.staff_id,
@@ -94,6 +96,7 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
         current_event_id=staff.current_event_id,
         hours_in_shift=hours_in_shift(staff.shift_start, now),
         fatigue_score=compute_fatigue(staff.shift_start, staff.task_history, now),
+        transit=transit_resp,
     )
 
 
@@ -118,6 +121,23 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
 async def staff_positions() -> list[StaffPositionItem]:
     now = datetime.utcnow()
     return [_staff_to_response(s, now) for s in store.all_staff()]
+
+
+@router.get("/events", response_model=list[EventItem])
+async def list_events() -> list[EventItem]:
+    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
+    return [
+        EventItem(
+            event_id=e.event_id,
+            room=e.room,
+            tier=e.tier,
+            symptom_tags=e.symptom_tags,
+            status=e.status,
+            assigned_staff_id=e.assigned_staff_id,
+            submitted_at=e.submitted_at,
+        )
+        for e in events
+    ]
 
 
 @router.post("/clear-assignment", response_model=ClearAssignmentResponse)
