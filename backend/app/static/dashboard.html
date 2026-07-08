@@ -101,6 +101,15 @@
     border-color: var(--tier1);
     color: var(--tier1);
   }
+  .topbar select {
+    font-family: var(--font-data);
+    font-size: 11px;
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    padding: 5px 8px;
+    border-radius: 6px;
+  }
 
   /* ---------- tier legend strip ---------- */
   .legend {
@@ -321,10 +330,18 @@
       <span class="subtitle">Dispatch Console</span>
     </div>
     <div class="right">
+      <label for="speed-select" style="color:var(--ink-faint)">playback</label>
+      <select id="speed-select">
+        <option value="1">1×  (real time)</option>
+        <option value="2">2×</option>
+        <option value="5">5×</option>
+        <option value="10">10×</option>
+      </select>
       <span id="clock">--:--:--</span>
       <span id="conn-status">connecting…</span>
       <button id="reset-btn">Reset simulation</button>
     </div>
+
   </div>
 
   <div class="legend">
@@ -398,9 +415,13 @@ function buildMapSVG() {
     svg += `<circle class="room-halo" data-halo="${room}" cx="${p.x}" cy="${p.y}" r="26" fill="none" stroke-width="3" />`;
     svg += `<circle class="${isNS ? 'ns-core' : 'room-core'}" cx="${p.x}" cy="${p.y}" r="${r}" />`;
     svg += `<text class="${isNS ? 'ns-label' : 'room-label'}" x="${p.x}" y="${p.y - r - 8}" text-anchor="middle">${room}</text>`;
-    svg += `<g data-chips="${room}"></g>`;
     svg += `</g>`;
   });
+
+  // One persistent layer for staff chips — chips are created once and
+  // repositioned every animation frame, never rebuilt from scratch.
+  // Rebuilding on every poll is what caused teleporting before.
+  svg += `<g id="chips-layer"></g>`;
 
   svg += `</svg>`;
   document.getElementById("map-svg-holder").innerHTML = svg;
@@ -427,10 +448,16 @@ function timeAgo(iso) {
 }
 
 /* ---------------------------------------------------------------------
-   Polling loop
+   Polling loop — fetches truth from the backend on an interval.
+   Rendering staff positions is NOT done here; see the render loop below.
 --------------------------------------------------------------------- */
 const POLL_MS = 1500;
 const FATIGUE_DISPLAY_MAX = 55; // visual normalization only, not a backend constant
+
+let speedMultiplier = 1;
+document.getElementById("speed-select").addEventListener("change", (e) => {
+  speedMultiplier = Number(e.target.value);
+});
 
 async function fetchJSON(path, opts) {
   const res = await fetch(path, opts);
@@ -438,31 +465,101 @@ async function fetchJSON(path, opts) {
   return res.json();
 }
 
-function renderStaffOnMap(staff) {
-  document.querySelectorAll("[data-chips]").forEach(g => (g.innerHTML = ""));
-  const byRoom = {};
-  staff.forEach(s => {
-    const room = s.current_position.room;
-    (byRoom[room] = byRoom[room] || []).push(s);
+/* ---------------------------------------------------------------------
+   Dead-reckoning render loop.
+
+   Every staff member's transit (path + cumulative hop_times + real
+   departure_time) comes straight from the backend's actual routing
+   decision (app/routing/eta.py's shortest_path, the same function used
+   to filter/score candidates) — the client never invents or guesses a
+   route. Position on screen is a pure function of wall-clock elapsed
+   time against that plan, recomputed every animation frame. There is no
+   teleport: a staff member with no transit (already arrived, or never
+   moved) simply renders at their current room.
+--------------------------------------------------------------------- */
+let latestStaff = [];
+
+function interpolateOnPath(path, hopTimes, elapsedMinutes) {
+  const total = hopTimes[hopTimes.length - 1];
+  if (elapsedMinutes <= 0) return ROOM_COORDS[path[0]];
+  if (elapsedMinutes >= total) return ROOM_COORDS[path[path.length - 1]];
+  for (let i = 0; i < hopTimes.length - 1; i++) {
+    const segStart = hopTimes[i], segEnd = hopTimes[i + 1];
+    if (elapsedMinutes >= segStart && elapsedMinutes <= segEnd) {
+      const t = segEnd > segStart ? (elapsedMinutes - segStart) / (segEnd - segStart) : 1;
+      const a = ROOM_COORDS[path[i]], b = ROOM_COORDS[path[i + 1]];
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+  }
+  return ROOM_COORDS[path[path.length - 1]];
+}
+
+function positionFor(s) {
+  if (s.transit) {
+    const departureMs = parseUTC(s.transit.departure_time).getTime();
+    const elapsedMinutes = ((Date.now() - departureMs) / 60000) * speedMultiplier;
+    const totalMinutes = s.transit.hop_times[s.transit.hop_times.length - 1];
+    if (elapsedMinutes < totalMinutes) {
+      return { pos: interpolateOnPath(s.transit.path, s.transit.hop_times, elapsedMinutes), inTransit: true };
+    }
+  }
+  return { pos: ROOM_COORDS[s.current_position.room], inTransit: false };
+}
+
+function ensureChip(staffId, role) {
+  if (document.querySelector(`[data-staff="${staffId}"]`)) return;
+  const layer = document.getElementById("chips-layer");
+  const color = ROLE_COLOR[role] || "var(--ink-muted)";
+  layer.insertAdjacentHTML("beforeend", `
+    <circle class="staff-chip-bg" data-staff="${staffId}" r="11" fill="${color}" />
+    <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3">${staffId.split("-")[0]}</text>
+  `);
+}
+
+function renderFrame() {
+  requestAnimationFrame(renderFrame);
+  if (!latestStaff.length) return;
+
+  const resolved = latestStaff.map(s => ({ s, ...positionFor(s) }));
+
+  // Multiple staff at rest in the same room get a small arc offset so
+  // they don't stack. Only applies to staff who have actually arrived —
+  // someone mid-transit is genuinely between rooms, not "at" one.
+  const arrivedByRoom = {};
+  resolved.forEach(({ s, inTransit }) => {
+    if (!inTransit) {
+      const room = s.current_position.room;
+      (arrivedByRoom[room] = arrivedByRoom[room] || []).push(s.staff_id);
+    }
   });
-  Object.entries(byRoom).forEach(([room, list]) => {
-    const holder = document.querySelector(`[data-chips="${room}"]`);
-    if (!holder) return;
-    const center = ROOM_COORDS[room];
-    const n = list.length;
-    list.forEach((s, i) => {
-      const angle = (i / Math.max(n, 1)) * Math.PI * 2 - Math.PI / 2;
-      const cx = center.x + Math.cos(angle) * 32;
-      const cy = center.y + Math.sin(angle) * 32;
-      const color = ROLE_COLOR[s.role] || "var(--ink-muted)";
-      holder.innerHTML += `
-        <circle class="staff-chip-bg ${s.status === 'busy' ? 'busy' : ''}"
-                cx="${cx}" cy="${cy}" r="11" fill="${color}" />
-        <text class="staff-chip" x="${cx}" y="${cy + 3}" text-anchor="middle">${s.staff_id.split('-')[0]}</text>
-      `;
-    });
+
+  resolved.forEach(({ s, pos, inTransit }) => {
+    ensureChip(s.staff_id, s.role);
+    let { x, y } = pos;
+    if (!inTransit) {
+      const group = arrivedByRoom[s.current_position.room];
+      const n = group.length;
+      if (n > 1) {
+        const idx = group.indexOf(s.staff_id);
+        const angle = (idx / n) * Math.PI * 2 - Math.PI / 2;
+        x += Math.cos(angle) * 28;
+        y += Math.sin(angle) * 28;
+      }
+    }
+    const bg = document.querySelector(`[data-staff="${s.staff_id}"]`);
+    const label = document.querySelector(`[data-staff-label="${s.staff_id}"]`);
+    if (bg) {
+      bg.setAttribute("cx", x);
+      bg.setAttribute("cy", y);
+      bg.classList.toggle("busy", s.status === "busy");
+    }
+    if (label) {
+      label.setAttribute("x", x);
+      label.setAttribute("y", y + 3);
+    }
   });
 }
+requestAnimationFrame(renderFrame);
 
 function renderRoomHalos(events) {
   document.querySelectorAll(".room-halo").forEach(el => {
@@ -569,7 +666,7 @@ async function poll() {
       fetchJSON("/staff-positions"),
       fetchJSON("/events"),
     ]);
-    renderStaffOnMap(staff);
+    latestStaff = staff; // consumed by the requestAnimationFrame render loop
     renderRoomHalos(events);
     renderEventFeed(events);
     renderStaffRoster(staff);
