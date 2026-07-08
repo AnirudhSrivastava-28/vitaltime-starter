@@ -25,16 +25,21 @@ class StaffPosition:
 
 @dataclass
 class TransitPlan:
-    """A real, currently-in-progress move across the facility graph.
+    """A currently-in-progress move across the facility graph.
 
-    path/hop_times come directly from eta.shortest_path() — the same
-    function used for feasibility filtering — so the animation this
-    drives is never a client-side approximation of the routing decision;
-    it's a rendering of the exact decision.
+    path/hop_times come from eta.shortest_path() — the same function used
+    for feasibility filtering — so the animation this drives is never a
+    client-side approximation; it's a rendering of the real routing
+    decision.
+
+    hop_times are in *sim minutes* (unscaled routing units, as used by the
+    scoring/filtering code). The API response layer scales these to real
+    wall-clock seconds via DEMO_TIME_SCALE for the client.
     """
-    path: list[str]           # ordered room ids, path[0] = origin, path[-1] = destination
-    hop_times: list[float]    # cumulative minutes-from-departure at each path index
+    path: list[str]
+    hop_times: list[float]
     departure_time: datetime
+    mode: Literal["outbound", "return"] = "outbound"
 
 
 @dataclass
@@ -44,6 +49,7 @@ class Staff:
     qualification_level: QualificationLevel
     shift_start: datetime
     current_position: StaffPosition
+    home_room: str = "NS"
     task_history: list[TaskHistoryEntry] = field(default_factory=list)
     status: StaffStatus = "available"
     current_event_id: Optional[str] = None
@@ -60,6 +66,9 @@ class Event:
     status: EventStatus = "pending"
     assigned_staff_id: Optional[str] = None
     escalated_from: Optional[str] = None
+    # Set by the sim engine when the assigned staff arrives at the room;
+    # the event auto-resolves once wall-clock time passes this timestamp.
+    tending_until: Optional[datetime] = None
 
 
 @dataclass
