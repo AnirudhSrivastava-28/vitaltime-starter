@@ -461,6 +461,19 @@ let latestStaff = [];
 let latestEvents = [];
 const eventsById = () => Object.fromEntries(latestEvents.map(e => [e.event_id, e]));
 
+/* Chips glide toward their true computed position instead of snapping to
+   it every frame. This matters at phase-transition moments specifically —
+   e.g. the instant a return trip is first observed, its departure_time
+   may already be up to one poll-interval in the past (see store.py's
+   advance_simulation docstring), so the "true" position on first render
+   can already be significantly down the path, or even at the destination.
+   Snapping straight there looks like teleporting. Gliding converges to
+   the true position within ~200-300ms — fast enough to stay accurate,
+   slow enough to read as continuous motion instead of a jump. */
+const CHIP_LERP = 0.22;
+let chipRenderState = {}; // staffId -> {x, y}, the currently-drawn position
+
+
 function interpolateOnPath(path, durationsSeconds, elapsedSeconds) {
   const total = durationsSeconds[durationsSeconds.length - 1];
   if (elapsedSeconds <= 0) return getRoomCoords(path[0]);
@@ -522,6 +535,7 @@ function ensureChip(staffId, role) {
     <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3" x="${ns.x}" y="${ns.y + 3}">${staffId.split("-")[0]}</text>
     <text class="phase-tag" data-phase-tag="${staffId}" text-anchor="middle" x="${ns.x}" y="${ns.y - 20}"></text>
   `);
+  chipRenderState[staffId] = { x: ns.x, y: ns.y };
 }
 
 function renderFrame() {
@@ -558,6 +572,17 @@ function renderFrame() {
         y += Math.sin(angle) * 28;
       }
     }
+
+    // Glide the drawn position toward the true target rather than
+    // snapping — see CHIP_LERP comment above.
+    const prevDrawn = chipRenderState[s.staff_id] || { x, y };
+    const drawn = {
+      x: prevDrawn.x + (x - prevDrawn.x) * CHIP_LERP,
+      y: prevDrawn.y + (y - prevDrawn.y) * CHIP_LERP,
+    };
+    chipRenderState[s.staff_id] = drawn;
+    x = drawn.x;
+    y = drawn.y;
 
     const bg = document.querySelector(`[data-staff="${s.staff_id}"]`);
     const label = document.querySelector(`[data-staff-label="${s.staff_id}"]`);
@@ -639,34 +664,98 @@ function displayStatus(e) {
   return e.status;
 }
 
+/* Keyed by event_id so a poll that changes nothing doesn't touch the DOM
+   at all, and a poll that changes one event's status only touches that
+   one row — instead of destroying and recreating all 40 rows every 800ms,
+   which is what was causing the "popping in and out" flicker. */
+const eventFeedNodes = new Map(); // event_id -> row element
+
 function renderEventFeed(events) {
   const el = document.getElementById("event-feed");
-  if (!events.length) {
+  const visible = events.slice(0, 40);
+
+  if (!visible.length) {
+    if (eventFeedNodes.size) {
+      eventFeedNodes.clear();
+    }
     el.innerHTML = `<div class="empty-state">Facility quiet — no events yet</div>`;
     return;
   }
-  el.innerHTML = events
-    .slice(0, 40)
-    .map(e => {
-      const status = displayStatus(e);
-      return `
-      <div class="event-row">
-        <div class="tier-badge t${e.tier}">T${e.tier}</div>
+
+  const emptyState = el.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+
+  const seenIds = new Set();
+  let prevNode = null;
+
+  visible.forEach(e => {
+    seenIds.add(e.event_id);
+    const status = displayStatus(e);
+    let node = eventFeedNodes.get(e.event_id);
+
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "event-row";
+      node.innerHTML = `
+        <div class="tier-badge"></div>
         <div class="event-main">
           <div class="event-top-line">
-            <span class="event-room">Room ${e.room}</span>
-            <span class="event-time">${timeAgo(e.submitted_at)}</span>
+            <span class="event-room"></span>
+            <span class="event-time"></span>
           </div>
-          <div class="event-tags">${e.symptom_tags.join(", ") || "—"}</div>
+          <div class="event-tags"></div>
           <div class="event-status-line">
-            <span class="status-pill ${status}">${status}</span>
-            ${e.assigned_staff_id ? `<span>&rarr; ${e.assigned_staff_id}</span>` : ""}
+            <span class="status-pill"></span>
+            <span class="event-assigned"></span>
           </div>
         </div>
-      </div>
-    `;
-    })
-    .join("");
+      `;
+      eventFeedNodes.set(e.event_id, node);
+    }
+
+    const badge = node.querySelector(".tier-badge");
+    const badgeClass = `tier-badge t${e.tier}`;
+    if (badge.className !== badgeClass) badge.className = badgeClass;
+    if (badge.textContent !== `T${e.tier}`) badge.textContent = `T${e.tier}`;
+
+    const roomEl = node.querySelector(".event-room");
+    const roomText = `Room ${e.room}`;
+    if (roomEl.textContent !== roomText) roomEl.textContent = roomText;
+
+    // Time-ago text changes every second regardless of poll data, so it's
+    // always written (cheap — just a textContent set, no layout thrash).
+    node.querySelector(".event-time").textContent = timeAgo(e.submitted_at);
+
+    const tagsEl = node.querySelector(".event-tags");
+    const tagsText = e.symptom_tags.join(", ") || "—";
+    if (tagsEl.textContent !== tagsText) tagsEl.textContent = tagsText;
+
+    const pill = node.querySelector(".status-pill");
+    const pillClass = `status-pill ${status}`;
+    if (pill.className !== pillClass) pill.className = pillClass;
+    if (pill.textContent !== status) pill.textContent = status;
+
+    const assignedEl = node.querySelector(".event-assigned");
+    const assignedText = e.assigned_staff_id ? `\u2192 ${e.assigned_staff_id}` : "";
+    if (assignedEl.textContent !== assignedText) assignedEl.textContent = assignedText;
+
+    // Keep DOM order matching the sorted event list, but only move a node
+    // when it's actually out of place.
+    if (prevNode) {
+      if (prevNode.nextElementSibling !== node) el.insertBefore(node, prevNode.nextElementSibling);
+    } else if (el.firstElementChild !== node) {
+      el.insertBefore(node, el.firstElementChild);
+    }
+    prevNode = node;
+  });
+
+  // Drop rows for events that fell out of the visible window.
+  for (const [id, node] of eventFeedNodes) {
+    if (!seenIds.has(id)) {
+      node.remove();
+      eventFeedNodes.delete(id);
+    }
+  }
 }
 
 /* =========================================================================
@@ -682,58 +771,113 @@ function phaseLabel(s, byId) {
   return `at Room ${s.current_position.room}`;
 }
 
+const staffRosterNodes = new Map(); // staff_id -> row element
+
 function renderStaffRoster(staff) {
   const el = document.getElementById("staff-roster");
   if (!staff.length) {
+    if (staffRosterNodes.size) staffRosterNodes.clear();
     el.innerHTML = `<div class="empty-state">No staff data available</div>`;
     return;
   }
+  const emptyState = el.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+
   const byId = eventsById();
   const order = { RN: 0, LPN: 1, CNA: 2 };
   const sorted = [...staff].sort((a, b) =>
     (order[a.role] - order[b.role]) || a.staff_id.localeCompare(b.staff_id)
   );
-  el.innerHTML = sorted.map(s => {
+
+  const seenIds = new Set();
+  let prevNode = null;
+
+  sorted.forEach(s => {
+    seenIds.add(s.staff_id);
+    let node = staffRosterNodes.get(s.staff_id);
+
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "staff-row";
+      node.innerHTML = `
+        <div class="staff-top-line">
+          <span class="role-dot"></span>
+          <span class="staff-id"></span>
+          <span class="busy-tag" hidden>busy</span>
+          <span class="staff-room"></span>
+        </div>
+        <div class="staff-phase"></div>
+        <div class="staff-meta">
+          <span class="staff-hours"></span>
+          <span class="staff-fatigue"></span>
+        </div>
+        <div class="fatigue-track"><div class="fatigue-fill"></div></div>
+        <button class="clear-btn" hidden>Clear assignment</button>
+      `;
+      staffRosterNodes.set(s.staff_id, node);
+
+      // Wire the click handler once, at creation — not on every render —
+      // so an in-flight "Clearing…" click can't get its own listener
+      // silently dropped and re-attached mid-request by a rebuild.
+      node.querySelector(".clear-btn").addEventListener("click", async (ev) => {
+        const btn = ev.currentTarget;
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.textContent = "Clearing…";
+        try {
+          await fetchJSON("/clear-assignment", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event_id: btn.dataset.event }),
+          });
+          await poll();
+        } catch (err) {
+          btn.textContent = "Failed — retry";
+          btn.disabled = false;
+        }
+      });
+    }
+
+    node.querySelector(".role-dot").style.background = ROLE_COLOR[s.role];
+    node.querySelector(".staff-id").textContent = s.staff_id;
+    node.querySelector(".busy-tag").hidden = s.status !== "busy";
+    node.querySelector(".staff-room").textContent = s.current_position.room;
+    node.querySelector(".staff-phase").textContent = phaseLabel(s, byId);
+    node.querySelector(".staff-hours").textContent = `${s.hours_in_shift.toFixed(1)}h in shift`;
+    node.querySelector(".staff-fatigue").textContent = `fatigue ${s.fatigue_score.toFixed(1)}`;
+
     const pct = Math.min(100, (s.fatigue_score / FATIGUE_DISPLAY_MAX) * 100);
     const barColor = pct > 66 ? "var(--tier1)" : pct > 33 ? "var(--tier2)" : "var(--tier3)";
-    return `
-      <div class="staff-row">
-        <div class="staff-top-line">
-          <span class="role-dot" style="background:${ROLE_COLOR[s.role]}"></span>
-          <span class="staff-id">${s.staff_id}</span>
-          ${s.status === "busy" ? `<span class="busy-tag">busy</span>` : ""}
-          <span class="staff-room">${s.current_position.room}</span>
-        </div>
-        <div class="staff-phase">${phaseLabel(s, byId)}</div>
-        <div class="staff-meta">
-          <span>${s.hours_in_shift.toFixed(1)}h in shift</span>
-          <span>fatigue ${s.fatigue_score.toFixed(1)}</span>
-        </div>
-        <div class="fatigue-track"><div class="fatigue-fill" style="width:${pct}%; background:${barColor}"></div></div>
-        ${s.status === "busy" && s.current_event_id
-          ? `<button class="clear-btn" data-event="${s.current_event_id}">Clear assignment</button>`
-          : ""}
-      </div>
-    `;
-  }).join("");
+    const fill = node.querySelector(".fatigue-fill");
+    fill.style.width = `${pct}%`;
+    fill.style.background = barColor;
 
-  el.querySelectorAll(".clear-btn").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      btn.textContent = "Clearing…";
-      try {
-        await fetchJSON("/clear-assignment", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ event_id: btn.dataset.event }),
-        });
-        await poll();
-      } catch (err) {
-        btn.textContent = "Failed — retry";
-        btn.disabled = false;
-      }
-    });
+    const btn = node.querySelector(".clear-btn");
+    const showBtn = s.status === "busy" && !!s.current_event_id;
+    btn.hidden = !showBtn;
+    if (showBtn) {
+      btn.dataset.event = s.current_event_id;
+      // Don't stomp "Clearing…"/"Failed — retry" text mid-request by
+      // re-rendering it back to the default label on the next poll.
+      if (!btn.disabled) btn.textContent = "Clear assignment";
+    } else {
+      btn.disabled = false;
+    }
+
+    if (prevNode) {
+      if (prevNode.nextElementSibling !== node) el.insertBefore(node, prevNode.nextElementSibling);
+    } else if (el.firstElementChild !== node) {
+      el.insertBefore(node, el.firstElementChild);
+    }
+    prevNode = node;
   });
+
+  for (const [id, node] of staffRosterNodes) {
+    if (!seenIds.has(id)) {
+      node.remove();
+      staffRosterNodes.delete(id);
+    }
+  }
 }
 
 /* =========================================================================
@@ -750,7 +894,7 @@ function renderStaffRoster(staff) {
    a simple monotonic check on the snapshot's own `server_time`, rather
    than guessing at staff/event consistency heuristically.
    ========================================================================= */
-const POLL_MS = 1500;
+const POLL_MS = 800;
 
 async function fetchJSON(path, opts) {
   const res = await fetch(path, opts);
@@ -818,6 +962,11 @@ document.getElementById("reset-btn").addEventListener("click", async () => {
   await fetchJSON("/reset-simulation", { method: "POST" });
   latestStaff = [];
   latestEvents = [];
+  chipRenderState = {};
+  eventFeedNodes.forEach(node => node.remove());
+  eventFeedNodes.clear();
+  staffRosterNodes.forEach(node => node.remove());
+  staffRosterNodes.clear();
   lastServerTimeMs = 0; // next snapshot is always "newer" than nothing
   await poll();
 });
