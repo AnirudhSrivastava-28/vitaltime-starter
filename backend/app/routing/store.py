@@ -6,10 +6,22 @@ are driven by wall-clock elapsed time against DEMO_TIME_SCALE, so the
 same clock the client uses for animation is the same clock the backend
 uses for state changes — client and backend can never disagree about
 which phase of the lifecycle a staff member is in.
+
+Also exposes a change-notification primitive (_signal_change /
+wait_for_change) used by the SSE endpoint in routers/routing.py to push
+state to clients the instant something changes, instead of clients
+polling. Two kinds of changes exist here, and both need to wake
+subscribers: explicit writes (a new event submitted, an assignment
+cleared) AND lazy time-based transitions that only get discovered when
+advance_simulation() runs (a staff member arriving, tending completing,
+etc.) — the latter is why the SSE loop still ticks on a short timeout
+even though it's primarily signal-driven, rather than only ever waiting
+on explicit writes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 import threading
@@ -38,16 +50,8 @@ def _naive_utc(dt: datetime) -> datetime:
 # ---- demo timing controls ---------------------------------------------------
 
 # Wall-clock acceleration. 1.0 = real time — a 2-minute ETA takes 2 real
-# minutes, a 4-minute tending window takes 4 real minutes. This used to
-# default to 15x for a fast-moving demo reel, but at that speed an entire
-# assigned -> tending -> resolved lifecycle finished in ~10-20 real
-# seconds: faster than the dashboard's 1.5s poll cadence could sample
-# cleanly (events appeared to pop in and out of the feed as polls skipped
-# over whole phases) and faster than the eye can track motion between
-# rooms (staff appeared to "fly" across multiple waypoints at once).
-# RESPONSE_WINDOWS and TENDING_MINUTES_BY_TIER below are already defined
-# in real minutes, so scale=1.0 makes them mean exactly what they say.
-# Override via env var if a sped-up demo reel is ever wanted again.
+# minutes, a 4-minute tending window takes 4 real minutes. Override via
+# env var if a sped-up demo reel is ever wanted again.
 DEMO_TIME_SCALE = float(os.environ.get("VITALTIME_TIME_SCALE", "1.0"))
 
 # How long an event holds a staff member at the room after arrival.
@@ -73,6 +77,48 @@ def sim_timedelta(sim_minutes: float) -> timedelta:
     return timedelta(seconds=sim_minutes_to_real_seconds(sim_minutes))
 
 
+# ---- change notification (for SSE) ------------------------------------------
+
+# Created lazily rather than at import time: asyncio.Event() is fine to
+# construct before a loop exists (it no longer binds to a loop at
+# construction as of Python 3.10), but lazy creation keeps this module
+# importable in any context (e.g. plain sync test code) without assuming
+# an event loop is already running.
+_change_event: Optional[asyncio.Event] = None
+
+
+def _get_change_event() -> asyncio.Event:
+    global _change_event
+    if _change_event is None:
+        _change_event = asyncio.Event()
+    return _change_event
+
+
+def _signal_change() -> None:
+    """Wake any SSE subscribers waiting in wait_for_change(). Called from
+    every write path below, and from _advance_single_staff whenever a
+    lazy time-based transition actually fires. Cheap and safe to call
+    even with zero subscribers."""
+    _get_change_event().set()
+
+
+async def wait_for_change(timeout: float) -> bool:
+    """Block until _signal_change() fires or `timeout` seconds elapse.
+
+    Returns True if woken by an explicit signal, False on timeout. The
+    caller (the SSE stream generator) re-checks state either way — the
+    timeout exists specifically to catch time-based transitions that
+    happen with nobody having explicitly called _signal_change() for them
+    yet, by forcing a periodic advance_simulation() regardless."""
+    ev = _get_change_event()
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+        ev.clear()
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 # ---- store ------------------------------------------------------------------
 
 _lock = threading.RLock()
@@ -92,18 +138,9 @@ def _seed_staff(now: datetime) -> None:
     room is also their home_room — where they return to after events resolve.
 
     Both fatigue inputs are randomized on every call (i.e. every cold start
-    and every /reset-simulation), rather than fixed:
-      - shift-elapsed hours (drives elapsed-time fatigue)
-      - a small random number of recent completed tasks (drives workload
-        fatigue)
-
-    A flat, identical baseline for every staff member on every reset meant
-    the tiered scoring (4:1 ETA:fatigue for Validation, 1:4 for Normal)
-    always made the same "who's freshest" call — there was no way to reset
-    into a genuinely different staffing-fatigue scenario to compare routing
-    behavior against. Randomizing gives a new, plausible mix (some staff
-    nearly fresh, some deep into their shift, a few carrying recent task
-    load) on every reset.
+    and every /reset-simulation), rather than fixed, so every reset gives a
+    genuinely different staffing-fatigue scenario to route against instead
+    of the same "who's freshest" call every time.
     """
     roster = [
         ("RN-001", "RN", "NS"),
@@ -151,6 +188,7 @@ def reset_simulation() -> None:
         _events.clear()
         _pending_ids.clear()
         _seed_staff(datetime.utcnow())
+    _signal_change()
 
 
 # ---- lifecycle simulation ---------------------------------------------------
@@ -165,6 +203,9 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
 
     Each transition is idempotent — calling with the same `now` twice is
     safe. A manual /clear-assignment before (2) short-circuits (2)+(3).
+    Each branch calls _signal_change() only when it actually fires, so
+    the SSE stream wakes immediately on a real transition rather than
+    waiting out its periodic safety-net timeout.
     """
     # (1) Outbound arrival
     if (
@@ -179,6 +220,7 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
             if event and event.status == "assigned" and event.tending_until is None:
                 tending_minutes = TENDING_MINUTES_BY_TIER.get(event.tier, 3.0)
                 event.tending_until = arrival + sim_timedelta(tending_minutes)
+                _signal_change()
 
     # (2) Tending complete → resolve
     if (
@@ -217,6 +259,7 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
                 # Already at home (edge case).
                 staff.transit = None
                 staff.current_position = StaffPosition(room=staff.home_room)
+            _signal_change()
 
     # (3) Return arrival → idle
     if (
@@ -227,6 +270,7 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
         return_arrival = staff.transit.departure_time + sim_timedelta(staff.transit.hop_times[-1])
         if now >= return_arrival:
             staff.transit = None
+            _signal_change()
 
 
 def advance_simulation(now: Optional[datetime] = None) -> None:
@@ -235,8 +279,10 @@ def advance_simulation(now: Optional[datetime] = None) -> None:
     Called at the top of every read path (all_staff, all_events) so the
     state a client sees is always current — no background threads needed,
     no race between reader and writer, no dependency on how often clients
-    poll. If nothing polls for 10 seconds, the next read still resolves
-    all transitions that should have happened during those 10 seconds.
+    poll. The SSE stream (routers/routing.py) also calls this directly on
+    every tick of its own loop, since it's the thing now responsible for
+    discovering lazy time-based transitions in the first place — nothing
+    else reads state on a timer anymore once clients stop polling.
     """
     now = _naive_utc(now or datetime.utcnow())
     with _lock:
@@ -293,6 +339,7 @@ def create_event(
     )
     with _lock:
         _events[event.event_id] = event
+    _signal_change()
     return event
 
 
@@ -327,8 +374,9 @@ def assign_staff_to_event(
 
     eta_minutes/fatigue are the scoring inputs that justified this
     assignment (from the Candidate the engine selected) — stored on the
-    Event itself so /events and /dashboard-state always have them, not
-    just the single RouteEventResponse returned at submission time."""
+    Event itself so /events and /dashboard-state (and the SSE stream)
+    always have them, not just the single RouteEventResponse returned at
+    submission time."""
     now = _naive_utc(now)
     with _lock:
         origin_room = eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
@@ -350,6 +398,7 @@ def assign_staff_to_event(
             mode="outbound",
         )
         staff.task_history = prune_task_history(staff.task_history, now)
+    _signal_change()
 
 
 def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
@@ -376,7 +425,8 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
         staff.transit = None
         staff.current_event_id = None
         staff.status = "available"
-        return interrupted_id
+    _signal_change()
+    return interrupted_id
 
 
 def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
@@ -414,7 +464,8 @@ def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
 
         event.status = "resolved"
         event.assigned_staff_id = None
-        return event
+    _signal_change()
+    return event
 
 
 def routing_lock() -> threading.RLock:
