@@ -95,10 +95,14 @@ def _process_pending(now: datetime) -> Optional[AssignmentResult]:
     return reassigned
 
 
-def clear_assignment(event_id: str) -> Optional[AssignmentResult]:
+def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[AssignmentResult]:
     """Manual override — mark the event resolved and re-attempt any
-    pending events (which may now find a candidate)."""
-    now = datetime.utcnow()
+    pending events (which may now find a candidate).
+
+    Accepts an optional `now` to allow tests and callers to advance the
+    simulation to a specific timestamp before clearing an assignment.
+    """
+    now = now or datetime.utcnow()
     store.advance_simulation(now)
     event = store.clear_assignment(event_id, now)
     if event is None:

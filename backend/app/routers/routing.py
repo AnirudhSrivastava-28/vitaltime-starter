@@ -260,31 +260,6 @@ async def dashboard_stream() -> StreamingResponse:
     )
 
 
-def _event_to_item(event, now: datetime) -> EventItem:
-    return EventItem(
-        event_id=event.event_id,
-        room=event.room,
-        tier=event.tier,
-        symptom_tags=event.symptom_tags,
-        status=event.status,
-        assigned_staff_id=event.assigned_staff_id,
-        submitted_at=event.submitted_at,
-        tending_until=event.tending_until,
-        eta=event.eta,
-        fatigue_score_at_assignment=event.fatigue_score_at_assignment,
-    )
-
-
-def _dashboard_state() -> DashboardStateResponse:
-    now = datetime.utcnow()
-    return DashboardStateResponse(
-        server_time=now,
-        time_scale=1.0,
-        staff=[_staff_to_response(s, now) for s in store.all_staff()],
-        events=[_event_to_item(e, now) for e in store.all_events()],
-    )
-
-
 @router.post("/route-event", response_model=RouteEventResponse)
 async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
     result = engine.route_event_sequential(

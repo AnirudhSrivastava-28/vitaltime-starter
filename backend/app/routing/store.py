@@ -144,11 +144,6 @@ _SEED_TASK_COUNT_WEIGHTS = [40, 30, 20, 10]     # most staff start light
 _SEED_TASK_AGE_MINUTES_RANGE = (5.0, 200.0)     # stays under the 4h prune window
 
 
-def notify_state_change() -> None:
-    with _state_change_condition:
-        _state_change_condition.notify_all()
-
-
 def _seed_staff(now: datetime) -> None:
     """Demo staff roster for simulation/testing. Each staff member's initial
     room is also their home_room — where they return to after events resolve.
@@ -434,13 +429,20 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
             # event that's no longer actually assigned to anyone.
             interrupted.eta = None
             interrupted.fatigue_score_at_assignment = None
-            staff.current_position = StaffPosition(
-                room=eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
-            )
-            staff.transit = None
+
+        # Always snap the staff to their real current position and clear
+        # any transit when they are interrupted, even if the interrupted
+        # event record is missing or in an unexpected state. This
+        # preserves the invariant that a preempted staff is available
+        # and not mid-transit to an old destination.
+        staff.current_position = StaffPosition(
+            room=eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
+        )
+        staff.transit = None
         staff.current_event_id = None
         staff.status = "available"
     notify_state_change()
+    return interrupted_id
 
 
 def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:

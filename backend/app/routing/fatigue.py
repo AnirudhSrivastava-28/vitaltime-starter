@@ -37,7 +37,11 @@ def prune_task_history(
     task_history: list[TaskHistoryEntry], now: datetime
 ) -> list[TaskHistoryEntry]:
     cutoff = now - timedelta(hours=TASK_HISTORY_MAX_AGE_HOURS)
-    return [entry for entry in task_history if entry.completed_at >= cutoff]
+    # Ignore entries in the future (completed_at > now) and drop anything
+    # older than the cutoff. This defends against seeded or external
+    # timestamps that fall outside the expected window relative to the
+    # supplied `now` used for simulation/testing.
+    return [entry for entry in task_history if cutoff <= entry.completed_at <= now]
 
 
 def compute_fatigue(
