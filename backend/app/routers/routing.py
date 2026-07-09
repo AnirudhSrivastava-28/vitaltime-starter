@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import AsyncIterator, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.routing import engine, store
@@ -13,6 +15,15 @@ from app.routing.models import Staff
 from app.routing.store import DEMO_TIME_SCALE, sim_minutes_to_real_seconds
 
 router = APIRouter(tags=["routing"])
+
+# Safety-net interval for the SSE loop: even with zero explicit writes,
+# the stream still needs to periodically call advance_simulation() itself
+# to discover lazy time-based transitions (arrivals, tending completing,
+# etc.) — nothing else does this once clients stop polling. In between,
+# store._signal_change() wakes the loop immediately on any real change,
+# so this interval is a ceiling on latency for time-based transitions,
+# not the normal case.
+SSE_TICK_SECONDS = 1.0
 
 
 class RouteEventRequest(BaseModel):
@@ -68,13 +79,6 @@ class StaffPositionItem(BaseModel):
     hours_in_shift: float
     fatigue_score: float
     transit: Optional[TransitPlanResponse] = None
-    # Bumped by the backend on every /reset-simulation call. Any client
-    # (dashboard, iOS app) that's tracking local event state should watch
-    # this: if it changes between two reads, the simulation was reset out
-    # from under them and their local event history is now stale and
-    # should be cleared, not just left showing events that no longer
-    # exist server-side.
-    simulation_epoch: int
 
 
 class EventItem(BaseModel):
@@ -109,21 +113,19 @@ class DemoConfigResponse(BaseModel):
 
 
 class DashboardStateResponse(BaseModel):
-    """Atomic snapshot for the dashboard: staff + events computed from a
-    *single* advance_simulation() tick, under one lock acquisition, so the
-    two panels can never reflect two different instants of sim state.
+    """Atomic snapshot of staff + events computed from a *single*
+    advance_simulation() tick, under one lock acquisition, so the two
+    can never reflect two different instants of sim state.
 
-    Previously the dashboard fetched /staff-positions and /events as two
-    independent requests (via Promise.all). Each one internally called
-    advance_simulation() with its own datetime.utcnow(), and the two HTTP
-    responses landed back in the browser at slightly different times. At
-    DEMO_TIME_SCALE=15x, even ~100ms of ordinary network jitter between
-    the two responses is ~1.5 sim-seconds of drift — enough for a staff
-    chip's phase and an event's status to visibly disagree for a frame.
-    This endpoint replaces that pair with one consistent read."""
+    Served two ways:
+      - GET /dashboard-state: one-off fetch (kept for any client that
+        just wants a single current read, e.g. a debug tool).
+      - GET /dashboard-stream: this same payload pushed over SSE the
+        instant something changes, instead of a client polling for it.
+        This is the primary path now — see dashboard_stream() below.
+    """
     server_time: datetime
     time_scale: float
-    simulation_epoch: int
     staff: list[StaffPositionItem]
     events: list[EventItem]
 
@@ -159,7 +161,6 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
         hours_in_shift=hours_in_shift(staff.shift_start, now),
         fatigue_score=compute_fatigue(staff.shift_start, staff.task_history, now),
         transit=transit_resp,
-        simulation_epoch=store.current_epoch(),
     )
 
 
@@ -182,18 +183,9 @@ def _events_to_items(now: datetime) -> list[EventItem]:
     ]
 
 
-@router.get("/demo-config", response_model=DemoConfigResponse)
-async def demo_config() -> DemoConfigResponse:
-    return DemoConfigResponse(time_scale=DEMO_TIME_SCALE)
-
-
-@router.get("/dashboard-state", response_model=DashboardStateResponse)
-async def dashboard_state() -> DashboardStateResponse:
-    """Single atomic read for the dashboard. Everything the client renders
-    (chip positions, tending rings, event feed, staff roster) is derived
-    from this one snapshot, taken under one lock, at one `now` — the
-    animation and the event/roster panels are guaranteed to describe the
-    same instant of simulation state."""
+def _build_dashboard_state() -> DashboardStateResponse:
+    """Shared by the one-off endpoint and every tick of the SSE stream —
+    one atomic snapshot, one lock acquisition, one `now`."""
     with store.routing_lock():
         now = datetime.utcnow()
         store.advance_simulation(now)
@@ -203,9 +195,66 @@ async def dashboard_state() -> DashboardStateResponse:
     return DashboardStateResponse(
         server_time=now,
         time_scale=DEMO_TIME_SCALE,
-        simulation_epoch=store.current_epoch(),
         staff=staff_items,
         events=event_items,
+    )
+
+
+async def _dashboard_state_event_stream() -> AsyncIterator[str]:
+    """SSE generator: pushes a full DashboardStateResponse the instant the
+    connection opens, then again every time store._signal_change() fires
+    (an explicit write, or a lazy time-based transition discovered by this
+    loop's own advance_simulation() call), with SSE_TICK_SECONDS as a
+    safety-net ceiling so lazy transitions and connection keep-alives
+    never wait longer than that even with zero explicit signals.
+
+    Every tick sends real data (not a bare comment) even when nothing
+    material changed, because fatigue_score/hours_in_shift are
+    continuously-drifting floats — at real-time pacing that drift IS the
+    update, not noise, and doubles as the SSE keep-alive so intermediate
+    proxies don't time out an idle-looking connection.
+    """
+    while True:
+        state = _build_dashboard_state()
+        yield f"data: {state.model_dump_json()}\n\n"
+        await store.wait_for_change(timeout=SSE_TICK_SECONDS)
+
+
+@router.get("/demo-config", response_model=DemoConfigResponse)
+async def demo_config() -> DemoConfigResponse:
+    return DemoConfigResponse(time_scale=DEMO_TIME_SCALE)
+
+
+@router.get("/dashboard-state", response_model=DashboardStateResponse)
+async def dashboard_state() -> DashboardStateResponse:
+    """One-off atomic read. Prefer /dashboard-stream for anything that
+    stays open and wants live updates — this is for a single current
+    snapshot."""
+    return _build_dashboard_state()
+
+
+@router.get("/dashboard-stream")
+async def dashboard_stream() -> StreamingResponse:
+    """Server-Sent Events stream of DashboardStateResponse snapshots.
+    Replaces client-side polling: instead of every client independently
+    asking "what's true now?" every N seconds, the backend pushes the
+    instant something actually changes (bounded by SSE_TICK_SECONDS as a
+    ceiling, not a floor). One central loop drives every connected
+    client, rather than N clients each running their own timer.
+
+    Headers: no-cache and X-Accel-Buffering:no ask any intermediate
+    proxy (Render's included) not to buffer the stream — buffering would
+    turn "push the instant it changes" back into "wait for a chunk to
+    fill up," defeating the point.
+    """
+    return StreamingResponse(
+        _dashboard_state_event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -229,21 +278,15 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
 @router.get("/staff-positions", response_model=list[StaffPositionItem])
 async def staff_positions() -> list[StaffPositionItem]:
     now = datetime.utcnow()
-    # store.all_staff() advances the sim internally, so the snapshot we
-    # return is guaranteed to reflect any transits/tending/returns that
-    # should have completed by `now`.
-    # NOTE: kept for backwards compatibility (e.g. other clients). The
-    # dashboard itself now uses /dashboard-state instead — see the module
-    # docstring on DashboardStateResponse for why.
+    # NOTE: kept for backwards compatibility. /dashboard-stream is the
+    # primary path now; this and /events remain for any client that just
+    # wants a one-off poll.
     return [_staff_to_response(s, now) for s in store.all_staff()]
 
 
 @router.get("/events", response_model=list[EventItem])
 async def list_events() -> list[EventItem]:
     now = datetime.utcnow()
-    # NOTE: kept for backwards compatibility. The dashboard uses
-    # /dashboard-state instead, to avoid this and /staff-positions ever
-    # being read at two different simulation instants.
     return _events_to_items(now)
 
 
