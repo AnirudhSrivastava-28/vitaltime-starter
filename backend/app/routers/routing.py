@@ -68,6 +68,13 @@ class StaffPositionItem(BaseModel):
     hours_in_shift: float
     fatigue_score: float
     transit: Optional[TransitPlanResponse] = None
+    # Bumped by the backend on every /reset-simulation call. Any client
+    # (dashboard, iOS app) that's tracking local event state should watch
+    # this: if it changes between two reads, the simulation was reset out
+    # from under them and their local event history is now stale and
+    # should be cleared, not just left showing events that no longer
+    # exist server-side.
+    simulation_epoch: int
 
 
 class EventItem(BaseModel):
@@ -79,6 +86,8 @@ class EventItem(BaseModel):
     assigned_staff_id: Optional[str]
     submitted_at: datetime
     tending_until: Optional[datetime] = None
+    eta: Optional[float] = None
+    fatigue_score_at_assignment: Optional[float] = None
 
 
 class ClearAssignmentRequest(BaseModel):
@@ -114,6 +123,7 @@ class DashboardStateResponse(BaseModel):
     This endpoint replaces that pair with one consistent read."""
     server_time: datetime
     time_scale: float
+    simulation_epoch: int
     staff: list[StaffPositionItem]
     events: list[EventItem]
 
@@ -149,6 +159,7 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
         hours_in_shift=hours_in_shift(staff.shift_start, now),
         fatigue_score=compute_fatigue(staff.shift_start, staff.task_history, now),
         transit=transit_resp,
+        simulation_epoch=store.current_epoch(),
     )
 
 
@@ -164,6 +175,8 @@ def _events_to_items(now: datetime) -> list[EventItem]:
             assigned_staff_id=e.assigned_staff_id,
             submitted_at=e.submitted_at,
             tending_until=e.tending_until,
+            eta=e.eta,
+            fatigue_score_at_assignment=e.fatigue_score_at_assignment,
         )
         for e in events
     ]
@@ -190,6 +203,7 @@ async def dashboard_state() -> DashboardStateResponse:
     return DashboardStateResponse(
         server_time=now,
         time_scale=DEMO_TIME_SCALE,
+        simulation_epoch=store.current_epoch(),
         staff=staff_items,
         events=event_items,
     )
