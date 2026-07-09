@@ -19,6 +19,16 @@ from app.routing.models import Staff
 
 # Demo facility graph: undirected edges with travel time in minutes.
 # Rooms are typical nursing-home identifiers; NS = nurse station.
+#
+# IMPORTANT: this range must stay in sync with every room picker that can
+# submit an event (currently the iOS EventFormView dropdown, 101-112).
+# A room that a client can submit but that isn't a node here degrades
+# gracefully *server-side* (shortest_path returns a conservative fallback
+# below) but previously broke the dashboard's client-side animation, since
+# the client has no equivalent fallback for a room missing from its own
+# coordinate map — see dashboard.html's ROOM_COORDS/getRoomCoords. Rooms
+# 111-112 were added here (and mirrored in dashboard.html) specifically to
+# close that gap; if the dropdown range ever changes again, update both.
 _FACILITY_EDGES: tuple[tuple[str, str, float], ...] = (
     ("NS", "101", 1.0),
     ("NS", "105", 1.2),
@@ -32,6 +42,8 @@ _FACILITY_EDGES: tuple[tuple[str, str, float], ...] = (
     ("107", "108", 0.4),
     ("108", "109", 0.5),
     ("109", "110", 0.4),
+    ("110", "111", 0.4),
+    ("111", "112", 0.4),
     ("102", "106", 0.8),
     ("103", "107", 0.8),
     ("104", "108", 0.9),
