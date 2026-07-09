@@ -69,6 +69,17 @@ class Event:
     # Set by the sim engine when the assigned staff arrives at the room;
     # the event auto-resolves once wall-clock time passes this timestamp.
     tending_until: Optional[datetime] = None
+    # Snapshot of the routing decision at the moment of assignment. Stored
+    # here (not just returned once in RouteEventResponse) so that any later
+    # read of this event — /events, /dashboard-state, a fresh poll after
+    # the client that submitted it is long gone — still has the numbers
+    # that justified the decision, instead of them only existing in a
+    # single HTTP response nobody may still be holding onto. Cleared back
+    # to None if the event is interrupted and returned to pending, since a
+    # stale eta/fatigue from the old assignment would be misleading once
+    # it's no longer actually assigned to anyone.
+    eta: Optional[float] = None
+    fatigue_score_at_assignment: Optional[float] = None
 
 
 @dataclass
