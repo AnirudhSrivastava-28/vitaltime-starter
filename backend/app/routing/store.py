@@ -319,9 +319,16 @@ def assign_staff_to_event(
     event: Event,
     staff: Staff,
     now: datetime,
+    eta_minutes: Optional[float] = None,
+    fatigue: Optional[float] = None,
 ) -> None:
     """Assign staff → compute real transit plan from their *true* current
-    position (may be mid-transit from a prior return trip)."""
+    position (may be mid-transit from a prior return trip).
+
+    eta_minutes/fatigue are the scoring inputs that justified this
+    assignment (from the Candidate the engine selected) — stored on the
+    Event itself so /events and /dashboard-state always have them, not
+    just the single RouteEventResponse returned at submission time."""
     now = _naive_utc(now)
     with _lock:
         origin_room = eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
@@ -330,6 +337,8 @@ def assign_staff_to_event(
         event.status = "assigned"
         event.assigned_staff_id = staff.staff_id
         event.tending_until = None
+        event.eta = eta_minutes
+        event.fatigue_score_at_assignment = fatigue
 
         staff.status = "busy"
         staff.current_event_id = event.event_id
@@ -357,6 +366,10 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
             interrupted.status = "pending"
             interrupted.assigned_staff_id = None
             interrupted.tending_until = None  # tending was never completed
+            # Stale numbers from the old assignment would misrepresent an
+            # event that's no longer actually assigned to anyone.
+            interrupted.eta = None
+            interrupted.fatigue_score_at_assignment = None
         staff.current_position = StaffPosition(
             room=eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
         )
