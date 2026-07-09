@@ -99,6 +99,25 @@ class DemoConfigResponse(BaseModel):
     poll_interval_ms: int = 1500
 
 
+class DashboardStateResponse(BaseModel):
+    """Atomic snapshot for the dashboard: staff + events computed from a
+    *single* advance_simulation() tick, under one lock acquisition, so the
+    two panels can never reflect two different instants of sim state.
+
+    Previously the dashboard fetched /staff-positions and /events as two
+    independent requests (via Promise.all). Each one internally called
+    advance_simulation() with its own datetime.utcnow(), and the two HTTP
+    responses landed back in the browser at slightly different times. At
+    DEMO_TIME_SCALE=15x, even ~100ms of ordinary network jitter between
+    the two responses is ~1.5 sim-seconds of drift — enough for a staff
+    chip's phase and an event's status to visibly disagree for a frame.
+    This endpoint replaces that pair with one consistent read."""
+    server_time: datetime
+    time_scale: float
+    staff: list[StaffPositionItem]
+    events: list[EventItem]
+
+
 def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
     from app.routing.fatigue import compute_fatigue, hours_in_shift
 
@@ -133,9 +152,47 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
     )
 
 
+def _events_to_items(now: datetime) -> list[EventItem]:
+    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
+    return [
+        EventItem(
+            event_id=e.event_id,
+            room=e.room,
+            tier=e.tier,
+            symptom_tags=e.symptom_tags,
+            status=e.status,
+            assigned_staff_id=e.assigned_staff_id,
+            submitted_at=e.submitted_at,
+            tending_until=e.tending_until,
+        )
+        for e in events
+    ]
+
+
 @router.get("/demo-config", response_model=DemoConfigResponse)
 async def demo_config() -> DemoConfigResponse:
     return DemoConfigResponse(time_scale=DEMO_TIME_SCALE)
+
+
+@router.get("/dashboard-state", response_model=DashboardStateResponse)
+async def dashboard_state() -> DashboardStateResponse:
+    """Single atomic read for the dashboard. Everything the client renders
+    (chip positions, tending rings, event feed, staff roster) is derived
+    from this one snapshot, taken under one lock, at one `now` — the
+    animation and the event/roster panels are guaranteed to describe the
+    same instant of simulation state."""
+    with store.routing_lock():
+        now = datetime.utcnow()
+        store.advance_simulation(now)
+        staff_items = [_staff_to_response(s, now) for s in store.all_staff()]
+        event_items = _events_to_items(now)
+
+    return DashboardStateResponse(
+        server_time=now,
+        time_scale=DEMO_TIME_SCALE,
+        staff=staff_items,
+        events=event_items,
+    )
 
 
 @router.post("/route-event", response_model=RouteEventResponse)
@@ -161,25 +218,19 @@ async def staff_positions() -> list[StaffPositionItem]:
     # store.all_staff() advances the sim internally, so the snapshot we
     # return is guaranteed to reflect any transits/tending/returns that
     # should have completed by `now`.
+    # NOTE: kept for backwards compatibility (e.g. other clients). The
+    # dashboard itself now uses /dashboard-state instead — see the module
+    # docstring on DashboardStateResponse for why.
     return [_staff_to_response(s, now) for s in store.all_staff()]
 
 
 @router.get("/events", response_model=list[EventItem])
 async def list_events() -> list[EventItem]:
-    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
-    return [
-        EventItem(
-            event_id=e.event_id,
-            room=e.room,
-            tier=e.tier,
-            symptom_tags=e.symptom_tags,
-            status=e.status,
-            assigned_staff_id=e.assigned_staff_id,
-            submitted_at=e.submitted_at,
-            tending_until=e.tending_until,
-        )
-        for e in events
-    ]
+    now = datetime.utcnow()
+    # NOTE: kept for backwards compatibility. The dashboard uses
+    # /dashboard-state instead, to avoid this and /staff-positions ever
+    # being read at two different simulation instants.
+    return _events_to_items(now)
 
 
 @router.post("/clear-assignment", response_model=ClearAssignmentResponse)
