@@ -42,7 +42,7 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
         staff=chosen.staff,
         now=now,
         eta_minutes=chosen.eta,
-        fatigue=chosen.fatigue,
+        fatigue_score_at_assignment=chosen.fatigue,
     )
 
     return AssignmentResult(

@@ -94,6 +94,8 @@ class EventItem(BaseModel):
     fatigue_score_at_assignment: Optional[float] = None
 
 
+
+
 class ClearAssignmentRequest(BaseModel):
     event_id: str
 
@@ -255,6 +257,31 @@ async def dashboard_stream() -> StreamingResponse:
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
+    )
+
+
+def _event_to_item(event, now: datetime) -> EventItem:
+    return EventItem(
+        event_id=event.event_id,
+        room=event.room,
+        tier=event.tier,
+        symptom_tags=event.symptom_tags,
+        status=event.status,
+        assigned_staff_id=event.assigned_staff_id,
+        submitted_at=event.submitted_at,
+        tending_until=event.tending_until,
+        eta=event.eta,
+        fatigue_score_at_assignment=event.fatigue_score_at_assignment,
+    )
+
+
+def _dashboard_state() -> DashboardStateResponse:
+    now = datetime.utcnow()
+    return DashboardStateResponse(
+        server_time=now,
+        time_scale=1.0,
+        staff=[_staff_to_response(s, now) for s in store.all_staff()],
+        events=[_event_to_item(e, now) for e in store.all_events()],
     )
 
 

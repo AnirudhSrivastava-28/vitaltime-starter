@@ -102,6 +102,16 @@ def _signal_change() -> None:
     _get_change_event().set()
 
 
+def _notify_sync_waiters() -> None:
+    with _state_change_condition:
+        _state_change_condition.notify_all()
+
+
+def notify_state_change() -> None:
+    _signal_change()
+    _notify_sync_waiters()
+
+
 async def wait_for_change(timeout: float) -> bool:
     """Block until _signal_change() fires or `timeout` seconds elapse.
 
@@ -122,6 +132,7 @@ async def wait_for_change(timeout: float) -> bool:
 # ---- store ------------------------------------------------------------------
 
 _lock = threading.RLock()
+_state_change_condition = threading.Condition()
 _staff: dict[str, Staff] = {}
 _events: dict[str, Event] = {}
 _pending_ids: list[str] = []
@@ -131,6 +142,11 @@ _SEED_SHIFT_HOURS_RANGE = (0.25, 7.5)          # within a plausible 8h shift
 _SEED_TASK_COUNT_CHOICES = [0, 1, 2, 3]
 _SEED_TASK_COUNT_WEIGHTS = [40, 30, 20, 10]     # most staff start light
 _SEED_TASK_AGE_MINUTES_RANGE = (5.0, 200.0)     # stays under the 4h prune window
+
+
+def notify_state_change() -> None:
+    with _state_change_condition:
+        _state_change_condition.notify_all()
 
 
 def _seed_staff(now: datetime) -> None:
@@ -188,7 +204,7 @@ def reset_simulation() -> None:
         _events.clear()
         _pending_ids.clear()
         _seed_staff(datetime.utcnow())
-    _signal_change()
+    notify_state_change()
 
 
 # ---- lifecycle simulation ---------------------------------------------------
@@ -347,6 +363,7 @@ def enqueue_pending(event_id: str) -> None:
     with _lock:
         if event_id not in _pending_ids:
             _pending_ids.append(event_id)
+    notify_state_change()
 
 
 def pop_pending_queue() -> list[str]:
@@ -367,7 +384,7 @@ def assign_staff_to_event(
     staff: Staff,
     now: datetime,
     eta_minutes: Optional[float] = None,
-    fatigue: Optional[float] = None,
+    fatigue_score_at_assignment: Optional[float] = None,
 ) -> None:
     """Assign staff → compute real transit plan from their *true* current
     position (may be mid-transit from a prior return trip).
@@ -384,10 +401,8 @@ def assign_staff_to_event(
 
         event.status = "assigned"
         event.assigned_staff_id = staff.staff_id
-        event.tending_until = None
         event.eta = eta_minutes
-        event.fatigue_score_at_assignment = fatigue
-
+        event.fatigue_score_at_assignment = fatigue_score_at_assignment
         staff.status = "busy"
         staff.current_event_id = event.event_id
         staff.current_position = StaffPosition(room=event.room)
@@ -398,7 +413,7 @@ def assign_staff_to_event(
             mode="outbound",
         )
         staff.task_history = prune_task_history(staff.task_history, now)
-    _signal_change()
+    notify_state_change()
 
 
 def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
@@ -419,14 +434,13 @@ def release_interrupted_event(staff: Staff, now: datetime) -> Optional[str]:
             # event that's no longer actually assigned to anyone.
             interrupted.eta = None
             interrupted.fatigue_score_at_assignment = None
-        staff.current_position = StaffPosition(
-            room=eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
-        )
-        staff.transit = None
+            staff.current_position = StaffPosition(
+                room=eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
+            )
+            staff.transit = None
         staff.current_event_id = None
         staff.status = "available"
-    _signal_change()
-    return interrupted_id
+    notify_state_change()
 
 
 def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
@@ -464,8 +478,15 @@ def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
 
         event.status = "resolved"
         event.assigned_staff_id = None
-    _signal_change()
+        event.eta = None
+        event.fatigue_score_at_assignment = None
+    notify_state_change()
     return event
+
+
+def wait_for_state_change(timeout: float = 60.0) -> bool:
+    with _state_change_condition:
+        return _state_change_condition.wait(timeout=timeout)
 
 
 def routing_lock() -> threading.RLock:
