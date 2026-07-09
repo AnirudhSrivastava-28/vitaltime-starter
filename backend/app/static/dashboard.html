@@ -354,6 +354,15 @@
 /* =========================================================================
    Facility graph — MUST mirror backend/app/routing/eta.py's _FACILITY_EDGES.
    Layout is schematic (subway-map style), not to scale.
+
+   Rooms 111-112 were previously missing here even though the iOS dropdown
+   allows submitting events for them — that gap is what caused the
+   "animation jumps back to the start" bug: a resolved event's return-trip
+   path could include a room with no entry in this map, ROOM_COORDS[room]
+   came back undefined, and destructuring undefined inside renderFrame()
+   threw every single frame, freezing all chips wherever they last
+   successfully rendered. Keep this object's keys a superset of every room
+   any client can submit.
    ========================================================================= */
 const ROOM_COORDS = {
   "NS":  { x: 60,  y: 40 },
@@ -367,18 +376,29 @@ const ROOM_COORDS = {
   "108": { x: 600, y: 300 },
   "109": { x: 760, y: 300 },
   "110": { x: 920, y: 300 },
+  "111": { x: 1080, y: 300 },
+  "112": { x: 1240, y: 300 },
 };
 const EDGES = [
   ["NS","101"], ["NS","105"], ["NS","108"],
   ["101","102"], ["102","103"], ["103","104"], ["104","105"],
   ["105","106"], ["106","107"], ["107","108"], ["108","109"], ["109","110"],
+  ["110","111"], ["111","112"],
   ["102","106"], ["103","107"], ["104","108"],
 ];
 const TIER_COLOR = { 1: "#E23D45", 2: "#E0A72E", 3: "#4FA98A" };
 const ROLE_COLOR = { RN: "#6C8EF5", LPN: "#B98CE0", CNA: "#58C4D6" };
 
+/* Defensive lookup — NEVER return undefined. Any room the client doesn't
+   recognize (a future graph mismatch, a bad seed, whatever) falls back to
+   the nurse station instead of throwing and freezing the render loop for
+   every staff member, not just the one with the bad room. */
+function getRoomCoords(room) {
+  return ROOM_COORDS[room] || ROOM_COORDS["NS"];
+}
+
 function buildMapSVG() {
-  const w = 1000, h = 360;
+  const w = 1160, h = 360;
   let svg = `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">`;
   EDGES.forEach(([a, b]) => {
     const pa = ROOM_COORDS[a], pb = ROOM_COORDS[b];
@@ -443,17 +463,17 @@ const eventsById = () => Object.fromEntries(latestEvents.map(e => [e.event_id, e
 
 function interpolateOnPath(path, durationsSeconds, elapsedSeconds) {
   const total = durationsSeconds[durationsSeconds.length - 1];
-  if (elapsedSeconds <= 0) return ROOM_COORDS[path[0]];
-  if (elapsedSeconds >= total) return ROOM_COORDS[path[path.length - 1]];
+  if (elapsedSeconds <= 0) return getRoomCoords(path[0]);
+  if (elapsedSeconds >= total) return getRoomCoords(path[path.length - 1]);
   for (let i = 0; i < durationsSeconds.length - 1; i++) {
     const segStart = durationsSeconds[i], segEnd = durationsSeconds[i + 1];
     if (elapsedSeconds >= segStart && elapsedSeconds <= segEnd) {
       const t = segEnd > segStart ? (elapsedSeconds - segStart) / (segEnd - segStart) : 1;
-      const a = ROOM_COORDS[path[i]], b = ROOM_COORDS[path[i + 1]];
+      const a = getRoomCoords(path[i]), b = getRoomCoords(path[i + 1]);
       return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
     }
   }
-  return ROOM_COORDS[path[path.length - 1]];
+  return getRoomCoords(path[path.length - 1]);
 }
 
 /* Phase resolution — pure function of staff+events+now, matches backend. */
@@ -462,7 +482,7 @@ function resolvePhase(s, byId) {
   //   tending         transit set,   mode=outbound, now >= arrival (event.status = "assigned")
   //   returning       transit set,   mode=return
   //   idle            no transit
-  if (!s.transit) return { phase: "idle", pos: ROOM_COORDS[s.current_position.room] };
+  if (!s.transit) return { phase: "idle", pos: getRoomCoords(s.current_position.room) };
 
   const departureMs = parseUTC(s.transit.departure_time).getTime();
   const arrivalMs = parseUTC(s.transit.arrival_time).getTime();
@@ -474,7 +494,7 @@ function resolvePhase(s, byId) {
     if (Date.now() < arrivalMs) {
       return { phase: "returning", pos: interpolateOnPath(s.transit.path, durations, elapsedSec) };
     }
-    return { phase: "idle", pos: ROOM_COORDS[s.current_position.room] };
+    return { phase: "idle", pos: getRoomCoords(s.current_position.room) };
   }
 
   // outbound
@@ -484,18 +504,23 @@ function resolvePhase(s, byId) {
   // Arrived. Are we tending?
   const evt = s.current_event_id ? byId[s.current_event_id] : null;
   const tier = evt ? evt.tier : null;
-  return { phase: "tending", pos: ROOM_COORDS[s.transit.path[s.transit.path.length - 1]], tier };
+  return { phase: "tending", pos: getRoomCoords(s.transit.path[s.transit.path.length - 1]), tier };
 }
 
 function ensureChip(staffId, role) {
   if (document.querySelector(`[data-staff="${staffId}"]`)) return;
   const layer = document.getElementById("chips-layer");
   const color = ROLE_COLOR[role] || "#7C8598";
+  // Seed cx/cy at NS immediately (rather than leaving them unset, which
+  // SVG defaults to (0,0)/top-left) — belt-and-suspenders so a chip is
+  // never visibly stranded at the corner even for a single frame before
+  // renderFrame() first positions it.
+  const ns = getRoomCoords("NS");
   layer.insertAdjacentHTML("beforeend", `
-    <circle class="tending-ring" data-ring="${staffId}" r="15" />
-    <circle class="staff-chip-bg" data-staff="${staffId}" r="11" fill="${color}" />
-    <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3">${staffId.split("-")[0]}</text>
-    <text class="phase-tag" data-phase-tag="${staffId}" text-anchor="middle"></text>
+    <circle class="tending-ring" data-ring="${staffId}" r="15" cx="${ns.x}" cy="${ns.y}" />
+    <circle class="staff-chip-bg" data-staff="${staffId}" r="11" fill="${color}" cx="${ns.x}" cy="${ns.y}" />
+    <text class="staff-chip" data-staff-label="${staffId}" text-anchor="middle" dy="3" x="${ns.x}" y="${ns.y + 3}">${staffId.split("-")[0]}</text>
+    <text class="phase-tag" data-phase-tag="${staffId}" text-anchor="middle" x="${ns.x}" y="${ns.y - 20}"></text>
   `);
 }
 
