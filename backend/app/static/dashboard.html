@@ -432,7 +432,10 @@ function timeAgo(iso) {
    Backend state transitions (arrival → tending starts, tending done →
    resolve → return begins, return done → idle) happen at the same real
    timestamps the client is interpolating against, so backend truth and
-   frontend animation stay in perfect sync by construction.
+   frontend animation stay in sync by construction — AS LONG AS the staff
+   list and the events list the client holds describe the same instant of
+   backend state. That guarantee now comes from /dashboard-state (a single
+   atomic snapshot) instead of two independently-timed requests.
    ========================================================================= */
 let latestStaff = [];
 let latestEvents = [];
@@ -709,24 +712,18 @@ function renderStaffRoster(staff) {
 }
 
 /* =========================================================================
-   Polling — with defensive checks against multi-worker split-brain.
+   Polling.
 
-   If Render is (mis)configured with >1 worker, each worker has its own
-   in-memory state. Polls round-robin between them. Two distinct symptoms:
+   The dashboard reads /dashboard-state — one atomic snapshot (staff +
+   events + server_time), computed under a single lock acquisition on a
+   single `now`, on the backend. That's what makes the animation and the
+   event/roster panels consistent with each other; there is no longer a
+   race between two independently-timed requests to reconcile client-side.
 
-   1. A response that's empty when the last one wasn't (event/staff list
-      wiped) — caught by the emptiness check below.
-   2. A worse variant: a NON-empty response where a specific staff member
-      reports idle at their home room, because that worker's copy of them
-      was never touched by the original assignment at all. This is what
-      produces "nurse arrives, then appears back at NS" — it's not really
-      snapping back, it's a different worker's untouched seed data being
-      served for that one poll. Caught by the timing check below: if a
-      staff member was busy with a known tending/arrival deadline still in
-      the future, and suddenly reports idle before that deadline, the
-      response is rejected.
-
-   Both are pure masking. The actual fix is running Render with 1 worker.
+   The only thing left to guard against is a poll response arriving out of
+   order (e.g. a retried request landing after a newer one) — handled with
+   a simple monotonic check on the snapshot's own `server_time`, rather
+   than guessing at staff/event consistency heuristically.
    ========================================================================= */
 const POLL_MS = 1500;
 
@@ -736,69 +733,33 @@ async function fetchJSON(path, opts) {
   return res.json();
 }
 
-function expectedBusyUntilMs(staff, prevEventsById) {
-  // Returns a timestamp before which this staff member should NOT
-  // legitimately be able to report idle — or null if we can't tell.
-  if (staff.status !== "busy" || !staff.transit) return null;
-  if (staff.transit.mode === "outbound") {
-    const evt = staff.current_event_id ? prevEventsById[staff.current_event_id] : null;
-    if (evt && evt.tending_until) return parseUTC(evt.tending_until).getTime();
-    return parseUTC(staff.transit.arrival_time).getTime();
-  }
-  if (staff.transit.mode === "return") {
-    return parseUTC(staff.transit.arrival_time).getTime();
-  }
-  return null;
-}
-
 let pollFailures = 0;
 let pollInFlight = false;
-let suspiciousStreak = 0;
+let lastServerTimeMs = 0;
 
 async function poll() {
   if (pollInFlight) return;
   pollInFlight = true;
   try {
-    const [staff, events] = await Promise.all([
-      fetchJSON("/staff-positions"),
-      fetchJSON("/events"),
-    ]);
+    const state = await fetchJSON("/dashboard-state");
+    const serverTimeMs = parseUTC(state.server_time).getTime();
 
-    const prevEventsById = eventsById();
-    const staffEmpty = !staff || staff.length === 0;
-    const activeEventsPrev = latestEvents.some(e => e.status === "assigned" || e.status === "pending");
-    const eventsEmptyButShouldnt = (events.length === 0) && activeEventsPrev;
-
-    let prematureIdle = false;
-    for (const prev of latestStaff) {
-      const deadline = expectedBusyUntilMs(prev, prevEventsById);
-      if (deadline === null || Date.now() >= deadline - 400) continue;
-      const now_ = staff.find(s => s.staff_id === prev.staff_id);
-      if (now_ && now_.status !== "busy" && !now_.transit) {
-        prematureIdle = true;
-        break;
-      }
+    // Reject only genuinely out-of-order responses (older snapshot than
+    // one we've already rendered). Everything else is trusted as-is,
+    // since it's a single atomic read rather than a stitched-together
+    // guess.
+    if (serverTimeMs < lastServerTimeMs) {
+      return;
     }
+    lastServerTimeMs = serverTimeMs;
 
-    if ((staffEmpty && latestStaff.length > 0) || eventsEmptyButShouldnt || prematureIdle) {
-      suspiciousStreak += 1;
-      if (suspiciousStreak <= 3) {
-        console.warn(
-          "VitalTime: suspicious poll response (",
-          prematureIdle ? "premature-idle" : "empty-regression",
-          "), skipping. If this recurs, confirm Render is running --workers 1."
-        );
-        return;
-      }
-    } else {
-      suspiciousStreak = 0;
-    }
+    latestStaff = state.staff;
+    latestEvents = state.events;
+    renderRoomHalos(latestEvents);
+    renderEventFeed(latestEvents);
+    renderStaffRoster(latestStaff);
+    document.getElementById("sim-scale-tag").textContent = `sim × ${state.time_scale}`;
 
-    latestStaff = staff;
-    latestEvents = events;
-    renderRoomHalos(events);
-    renderEventFeed(events);
-    renderStaffRoster(staff);
     pollFailures = 0;
     document.getElementById("conn-status").textContent = "live";
     document.getElementById("pulse-mark").style.background = "var(--tier3)";
@@ -816,13 +777,7 @@ async function poll() {
    Boot
    ========================================================================= */
 async function bootstrap() {
-  try {
-    const cfg = await fetchJSON("/demo-config");
-    document.getElementById("sim-scale-tag").textContent = `sim × ${cfg.time_scale}`;
-  } catch (err) {
-    document.getElementById("sim-scale-tag").textContent = "sim × ?";
-  }
-  poll();
+  await poll();
   setInterval(poll, POLL_MS);
 }
 bootstrap();
@@ -838,7 +793,7 @@ document.getElementById("reset-btn").addEventListener("click", async () => {
   await fetchJSON("/reset-simulation", { method: "POST" });
   latestStaff = [];
   latestEvents = [];
-  suspiciousStreak = 999; // force acceptance of the resulting empty response
+  lastServerTimeMs = 0; // next snapshot is always "newer" than nothing
   await poll();
 });
 </script>
