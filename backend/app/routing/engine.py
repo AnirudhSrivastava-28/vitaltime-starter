@@ -37,7 +37,13 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
         if interrupted_id:
             store.enqueue_pending(interrupted_id)
 
-    store.assign_staff_to_event(event=event, staff=chosen.staff, now=now)
+    store.assign_staff_to_event(
+        event=event,
+        staff=chosen.staff,
+        now=now,
+        eta_minutes=chosen.eta,
+        fatigue=chosen.fatigue,
+    )
 
     return AssignmentResult(
         event_id=event.event_id,
