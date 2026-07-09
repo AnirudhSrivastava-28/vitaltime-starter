@@ -10,6 +10,8 @@ which phase of the lifecycle a staff member is in.
 
 from __future__ import annotations
 
+import os
+import random
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,12 +37,18 @@ def _naive_utc(dt: datetime) -> datetime:
 
 # ---- demo timing controls ---------------------------------------------------
 
-# Wall-clock acceleration for the demo. 15x means 1 sim-minute = 4 real
-# seconds — a 3-minute transit plays out in 12 real seconds, a 4-minute
-# tending plays out in 16 real seconds. Full Tier 1 lifecycle ~30-40s.
-# Fatigue formulas remain calibrated in real time (unscaled); this only
-# affects transit, tending, and return timings.
-DEMO_TIME_SCALE = 15.0
+# Wall-clock acceleration. 1.0 = real time — a 2-minute ETA takes 2 real
+# minutes, a 4-minute tending window takes 4 real minutes. This used to
+# default to 15x for a fast-moving demo reel, but at that speed an entire
+# assigned -> tending -> resolved lifecycle finished in ~10-20 real
+# seconds: faster than the dashboard's 1.5s poll cadence could sample
+# cleanly (events appeared to pop in and out of the feed as polls skipped
+# over whole phases) and faster than the eye can track motion between
+# rooms (staff appeared to "fly" across multiple waypoints at once).
+# RESPONSE_WINDOWS and TENDING_MINUTES_BY_TIER below are already defined
+# in real minutes, so scale=1.0 makes them mean exactly what they say.
+# Override via env var if a sped-up demo reel is ever wanted again.
+DEMO_TIME_SCALE = float(os.environ.get("VITALTIME_TIME_SCALE", "1.0"))
 
 # How long an event holds a staff member at the room after arrival.
 TENDING_MINUTES_BY_TIER: dict[int, float] = {
@@ -72,11 +80,31 @@ _staff: dict[str, Staff] = {}
 _events: dict[str, Event] = {}
 _pending_ids: list[str] = []
 
+# Bounds for the randomized seed scenario — see _seed_staff.
+_SEED_SHIFT_HOURS_RANGE = (0.25, 7.5)          # within a plausible 8h shift
+_SEED_TASK_COUNT_CHOICES = [0, 1, 2, 3]
+_SEED_TASK_COUNT_WEIGHTS = [40, 30, 20, 10]     # most staff start light
+_SEED_TASK_AGE_MINUTES_RANGE = (5.0, 200.0)     # stays under the 4h prune window
+
 
 def _seed_staff(now: datetime) -> None:
     """Demo staff roster for simulation/testing. Each staff member's initial
-    room is also their home_room — where they return to after events resolve."""
-    shift_start = now - timedelta(hours=3)
+    room is also their home_room — where they return to after events resolve.
+
+    Both fatigue inputs are randomized on every call (i.e. every cold start
+    and every /reset-simulation), rather than fixed:
+      - shift-elapsed hours (drives elapsed-time fatigue)
+      - a small random number of recent completed tasks (drives workload
+        fatigue)
+
+    A flat, identical baseline for every staff member on every reset meant
+    the tiered scoring (4:1 ETA:fatigue for Validation, 1:4 for Normal)
+    always made the same "who's freshest" call — there was no way to reset
+    into a genuinely different staffing-fatigue scenario to compare routing
+    behavior against. Randomizing gives a new, plausible mix (some staff
+    nearly fresh, some deep into their shift, a few carrying recent task
+    load) on every reset.
+    """
     roster = [
         ("RN-001", "RN", "NS"),
         ("RN-002", "RN", "108"),
@@ -87,7 +115,10 @@ def _seed_staff(now: datetime) -> None:
         ("CNA-003", "CNA", "110"),
     ]
     for staff_id, role, room in roster:
-        _staff[staff_id] = Staff(
+        shift_hours = random.uniform(*_SEED_SHIFT_HOURS_RANGE)
+        shift_start = now - timedelta(hours=shift_hours)
+
+        staff = Staff(
             staff_id=staff_id,
             role=role,  # type: ignore[arg-type]
             qualification_level=ROLE_QUALIFICATION[role],  # type: ignore[index]
@@ -95,6 +126,18 @@ def _seed_staff(now: datetime) -> None:
             current_position=StaffPosition(room=room),
             home_room=room,
         )
+
+        task_count = random.choices(_SEED_TASK_COUNT_CHOICES, weights=_SEED_TASK_COUNT_WEIGHTS)[0]
+        for _ in range(task_count):
+            minutes_ago = random.uniform(*_SEED_TASK_AGE_MINUTES_RANGE)
+            staff.task_history.append(
+                TaskHistoryEntry(
+                    event_id=f"seed-{staff_id}-{uuid.uuid4().hex[:8]}",
+                    completed_at=now - timedelta(minutes=minutes_ago),
+                )
+            )
+
+        _staff[staff_id] = staff
 
 
 def _ensure_seeded() -> None:
