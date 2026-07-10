@@ -1,11 +1,6 @@
-
 fastapi
 uvicorn[standard]
 pydantic
-pydantic[email]>=2.0
 python-multipart
-bcrypt==4.0.1
-passlib[bcrypt]
-python-jose[cryptography]
 pandas
 pytest
