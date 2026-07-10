@@ -27,7 +27,7 @@ import random
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.routing import eta
 from app.routing.constants import ROLE_QUALIFICATION
@@ -136,6 +136,7 @@ _state_change_condition = threading.Condition()
 _staff: dict[str, Staff] = {}
 _events: dict[str, Event] = {}
 _pending_ids: list[str] = []
+_pending_retry_hook: Optional[Callable[[datetime], None]] = None
 
 # Bounds for the randomized seed scenario — see _seed_staff.
 _SEED_SHIFT_HOURS_RANGE = (0.25, 7.5)          # within a plausible 8h shift
@@ -204,7 +205,7 @@ def reset_simulation() -> None:
 
 # ---- lifecycle simulation ---------------------------------------------------
 
-def _advance_single_staff(staff: Staff, now: datetime) -> None:
+def _advance_single_staff(staff: Staff, now: datetime) -> bool:
     """Fire any state transitions that should have happened by `now`.
 
     Three transitions per staff member per tick:
@@ -212,12 +213,14 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
       (2) Tending complete → event resolves; return transit begins
       (3) Return arrival   → transit cleared; staff idle at home
 
+    Returns True if the staff member transitioned from busy to available.
     Each transition is idempotent — calling with the same `now` twice is
     safe. A manual /clear-assignment before (2) short-circuits (2)+(3).
     Each branch calls _signal_change() only when it actually fires, so
     the SSE stream wakes immediately on a real transition rather than
     waiting out its periodic safety-net timeout.
     """
+    freed = False
     # (1) Outbound arrival
     if (
         staff.status == "busy"
@@ -270,6 +273,7 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
                 # Already at home (edge case).
                 staff.transit = None
                 staff.current_position = StaffPosition(room=staff.home_room)
+            freed = True
             _signal_change()
 
     # (3) Return arrival → idle
@@ -282,6 +286,13 @@ def _advance_single_staff(staff: Staff, now: datetime) -> None:
         if now >= return_arrival:
             staff.transit = None
             _signal_change()
+
+    return freed
+
+
+def register_pending_retry_hook(fn: callable[[datetime], None]) -> None:
+    global _pending_retry_hook
+    _pending_retry_hook = fn
 
 
 def advance_simulation(now: Optional[datetime] = None) -> None:
@@ -296,9 +307,15 @@ def advance_simulation(now: Optional[datetime] = None) -> None:
     else reads state on a timer anymore once clients stop polling.
     """
     now = _naive_utc(now or datetime.utcnow())
+    freed_any = False
     with _lock:
         for staff in _staff.values():
-            _advance_single_staff(staff, now)
+            if _advance_single_staff(staff, now):
+                freed_any = True
+        pending_exists = bool(_pending_ids)
+
+    if freed_any and pending_exists and _pending_retry_hook is not None:
+        _pending_retry_hook(now)
 
 
 # ---- read paths (advance before returning) ----------------------------------
@@ -313,6 +330,18 @@ def all_staff() -> list[Staff]:
 def all_events() -> list[Event]:
     _ensure_seeded()
     advance_simulation()
+    with _lock:
+        return list(_events.values())
+
+
+def all_staff_raw() -> list[Staff]:
+    _ensure_seeded()
+    with _lock:
+        return list(_staff.values())
+
+
+def all_events_raw() -> list[Event]:
+    _ensure_seeded()
     with _lock:
         return list(_events.values())
 

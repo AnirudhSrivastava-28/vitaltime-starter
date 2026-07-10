@@ -47,6 +47,7 @@ class RouteEventRequest(BaseModel):
 
 class RouteEventResponse(BaseModel):
     event_id: str
+    room: str
     tier: int
     assigned_staff_id: Optional[str]
     eta: Optional[float]
@@ -190,7 +191,7 @@ def _build_dashboard_state() -> DashboardStateResponse:
     one atomic snapshot, one lock acquisition, one `now`."""
     with store.routing_lock():
         now = datetime.utcnow()
-        store.advance_simulation(now)
+        engine.tick(now)
         staff_items = [_staff_to_response(s, now) for s in store.all_staff()]
         event_items = _events_to_items(now)
 
@@ -269,6 +270,7 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
     )
     return RouteEventResponse(
         event_id=result.event_id,
+        room=payload.room,
         tier=result.tier,
         assigned_staff_id=result.assigned_staff_id,
         eta=result.eta,
@@ -301,8 +303,11 @@ async def clear_assignment(payload: ClearAssignmentRequest) -> ClearAssignmentRe
 
     reassigned_response = None
     if reassigned is not None:
+        reassigned_event = store.get_event(reassigned.event_id)
+        event_room = reassigned_event.room if reassigned_event is not None else ""
         reassigned_response = RouteEventResponse(
             event_id=reassigned.event_id,
+            room=event_room,
             tier=reassigned.tier,
             assigned_staff_id=reassigned.assigned_staff_id,
             eta=reassigned.eta,

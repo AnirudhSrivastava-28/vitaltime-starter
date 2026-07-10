@@ -11,13 +11,22 @@ from app.routing.scoring import select_candidate
 
 
 def _assign_event(event: Event, now: datetime) -> AssignmentResult:
-    events_by_id = {e.event_id: e for e in store.all_events()}
+    events_by_id = {e.event_id: e for e in store.all_events_raw()}
     candidates = filters.build_candidates(
-        staff_pool=store.all_staff(),
+        staff_pool=store.all_staff_raw(),
         event=event,
         events_by_id=events_by_id,
         now=now,
     )
+
+    if not candidates and event.tier == 1:
+        candidates = filters.build_candidates(
+            staff_pool=store.all_staff_raw(),
+            event=event,
+            events_by_id=events_by_id,
+            now=now,
+            enforce_window=False,
+        )
 
     chosen = select_candidate(candidates, tier=event.tier) if candidates else None
     if chosen is None:
@@ -62,10 +71,8 @@ def route_event_sequential(
     submitted_at: datetime,
 ) -> AssignmentResult:
     """Classify → attempt assign → if unassigned, park pending."""
-    # Bring state current before making a routing decision — a returning
-    # nurse who has actually reached home in the last few seconds should
-    # be a valid candidate for this new event.
-    store.advance_simulation(submitted_at)
+    now = datetime.utcnow()
+    tick(now)
 
     tier_value = tier.classify_tier(symptom_tags)
     event = store.create_event(
@@ -74,10 +81,10 @@ def route_event_sequential(
         symptom_tags=symptom_tags,
         submitted_at=submitted_at,
     )
-    result = _assign_event(event, now=submitted_at)
+    result = _assign_event(event, now=now)
     # If this assignment interrupted a lower-tier task, that task is now
     # pending — try to re-assign it before returning.
-    _process_pending(submitted_at)
+    _process_pending(now)
     return result
 
 
@@ -85,14 +92,23 @@ def _process_pending(now: datetime) -> Optional[AssignmentResult]:
     """Re-attempt any queued pending events; return the last successful
     assignment (if any) so the caller can surface it to the client."""
     reassigned: Optional[AssignmentResult] = None
-    for pending_id in store.pop_pending_queue():
-        pending_event = store.get_event(pending_id)
-        if pending_event is None or pending_event.status != "pending":
-            continue
+    pending_ids = store.pop_pending_queue()
+    pending_events = [store.get_event(eid) for eid in pending_ids]
+    pending_events = [e for e in pending_events if e is not None and e.status == "pending"]
+    pending_events.sort(key=lambda e: (e.tier, e.submitted_at))
+
+    for pending_event in pending_events:
         result = _assign_event(pending_event, now=now)
         if result.status == "assigned":
             reassigned = result
     return reassigned
+
+
+def tick(now: Optional[datetime] = None) -> None:
+    now = now or datetime.utcnow()
+    store.advance_simulation(now)
+    if store.pending_event_ids():
+        _process_pending(now)
 
 
 def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[AssignmentResult]:
@@ -103,8 +119,11 @@ def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[
     simulation to a specific timestamp before clearing an assignment.
     """
     now = now or datetime.utcnow()
-    store.advance_simulation(now)
+    tick(now)
     event = store.clear_assignment(event_id, now)
     if event is None:
         return None
     return _process_pending(now)
+
+
+store.register_pending_retry_hook(_process_pending)

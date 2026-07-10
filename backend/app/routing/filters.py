@@ -47,6 +47,8 @@ def build_candidates(
     event: Event,
     events_by_id: dict[str, Event],
     now: datetime,
+    *,
+    enforce_window: bool = True,
 ) -> list[Candidate]:
     """Apply hard filters and produce surviving candidates with ETA/fatigue."""
     candidates: list[Candidate] = []
@@ -56,7 +58,7 @@ def build_candidates(
             continue
 
         feasible, eta_val = is_time_feasible(staff, event, now)
-        if not feasible:
+        if enforce_window and not feasible:
             continue
 
         interruptible = False
