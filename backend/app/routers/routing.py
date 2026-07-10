@@ -324,5 +324,5 @@ async def clear_assignment(payload: ClearAssignmentRequest) -> ClearAssignmentRe
 
 @router.post("/reset-simulation")
 async def reset_simulation() -> dict[str, str]:
-    store.reset_simulation()
+    engine.reset_simulation()
     return {"status": "reset"}

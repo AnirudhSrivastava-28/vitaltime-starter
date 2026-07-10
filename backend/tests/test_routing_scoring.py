@@ -218,3 +218,21 @@ class TestEngineIntegration:
 
         all_pending = [e for e in store.all_events() if e.status == "pending"]
         assert any(e.event_id == pending_result.event_id for e in all_pending)
+
+    def test_reset_simulation_restarts_backend_state(self):
+        result = engine.route_event_sequential(
+            room="102",
+            symptom_tags=["possible fall"],
+            submitted_at=NOW,
+        )
+        assert result.status == "assigned"
+
+        engine.reset_simulation()
+
+        assert store.get_event(result.event_id) is None
+        assert store.pending_event_ids() == []
+
+        # Reset should reseed staff but not leave any old assignment state.
+        all_staff = store.all_staff()
+        assert all(s.status == "available" for s in all_staff)
+        assert all(s.current_event_id is None for s in all_staff)

@@ -126,4 +126,14 @@ def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[
     return _process_pending(now)
 
 
+def reset_simulation() -> None:
+    """Reinitialize the backend simulation state and notify clients.
+
+    The backend is the sole source of truth for scenario state. Any
+    client-side views should refresh from the live stream rather than
+    retaining stale local scenarios across resets.
+    """
+    store.reset_simulation()
+
+
 store.register_pending_retry_hook(_process_pending)
