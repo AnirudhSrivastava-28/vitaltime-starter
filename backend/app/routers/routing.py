@@ -1,8 +1,22 @@
-"""REST API for Layer 1 real-time dispatch (spec §8)."""
+"""REST API for Layer 1 real-time dispatch (spec §8).
+
+REDESIGN CHANGES:
+
+1. `RouteEventResponse` includes `room` — the session log flagged this
+   as needed so `reassigned_pending` displays which room the bumped
+   event is for.
+
+2. SSE loop calls `engine.tick()` per iteration, not `advance_simulation`
+   directly. `tick` covers the "returning staff passes through
+   feasibility for a pending event" case that has no discrete
+   busy→available transition to trigger the reactive retry hook.
+
+3. `_build_dashboard_state` also uses `engine.tick()` so a one-off
+   `/dashboard-state` fetch gets the same behavior as the stream.
+"""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Literal, Optional
 
@@ -11,18 +25,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.routing import engine, store
-from app.routing.models import Staff
+from app.routing.models import Event, Staff
 from app.routing.store import DEMO_TIME_SCALE, sim_minutes_to_real_seconds
 
 router = APIRouter(tags=["routing"])
 
-# Safety-net interval for the SSE loop: even with zero explicit writes,
-# the stream still needs to periodically call advance_simulation() itself
-# to discover lazy time-based transitions (arrivals, tending completing,
-# etc.) — nothing else does this once clients stop polling. In between,
-# store._signal_change() wakes the loop immediately on any real change,
-# so this interval is a ceiling on latency for time-based transitions,
-# not the normal case.
 SSE_TICK_SECONDS = 1.0
 
 
@@ -34,12 +41,6 @@ class RouteEventRequest(BaseModel):
     @field_validator("submitted_at")
     @classmethod
     def _ensure_naive_utc(cls, v: datetime) -> datetime:
-        """Clients may send an offset (e.g. a trailing 'Z'), which Pydantic
-        parses into a timezone-aware datetime. Everything internally is
-        naive UTC (datetime.utcnow()) — normalize once, here, at the
-        boundary, so nothing downstream ever has to reconcile aware vs
-        naive. Mixing the two raises TypeError on comparison, which is
-        exactly what was crashing /events and /staff-positions."""
         if v.tzinfo is not None:
             v = v.astimezone(timezone.utc).replace(tzinfo=None)
         return v
@@ -47,6 +48,7 @@ class RouteEventRequest(BaseModel):
 
 class RouteEventResponse(BaseModel):
     event_id: str
+    room: str
     tier: int
     assigned_staff_id: Optional[str]
     eta: Optional[float]
@@ -60,8 +62,8 @@ class StaffPositionResponse(BaseModel):
 
 class TransitPlanResponse(BaseModel):
     path: list[str]
-    hop_times: list[float]              # cumulative SIM minutes (for backwards compat)
-    hop_durations_seconds: list[float]  # cumulative REAL wall-clock seconds (client uses these)
+    hop_times: list[float]
+    hop_durations_seconds: list[float]
     departure_time: datetime
     arrival_time: datetime
     mode: Literal["outbound", "return"]
@@ -94,8 +96,6 @@ class EventItem(BaseModel):
     fatigue_score_at_assignment: Optional[float] = None
 
 
-
-
 class ClearAssignmentRequest(BaseModel):
     event_id: str
 
@@ -107,25 +107,11 @@ class ClearAssignmentResponse(BaseModel):
 
 
 class DemoConfigResponse(BaseModel):
-    """Timing metadata the client uses to interpret timestamps.
-    Exposing this makes the animation resilient to future scale changes —
-    the frontend never hardcodes the multiplier."""
     time_scale: float
     poll_interval_ms: int = 1500
 
 
 class DashboardStateResponse(BaseModel):
-    """Atomic snapshot of staff + events computed from a *single*
-    advance_simulation() tick, under one lock acquisition, so the two
-    can never reflect two different instants of sim state.
-
-    Served two ways:
-      - GET /dashboard-state: one-off fetch (kept for any client that
-        just wants a single current read, e.g. a debug tool).
-      - GET /dashboard-stream: this same payload pushed over SSE the
-        instant something changes, instead of a client polling for it.
-        This is the primary path now — see dashboard_stream() below.
-    """
     server_time: datetime
     time_scale: float
     staff: list[StaffPositionItem]
@@ -167,7 +153,7 @@ def _staff_to_response(staff: Staff, now: datetime) -> StaffPositionItem:
 
 
 def _events_to_items(now: datetime) -> list[EventItem]:
-    events = sorted(store.all_events(), key=lambda e: e.submitted_at, reverse=True)
+    events = sorted(store.all_events_raw(), key=lambda e: e.submitted_at, reverse=True)
     return [
         EventItem(
             event_id=e.event_id,
@@ -185,13 +171,23 @@ def _events_to_items(now: datetime) -> list[EventItem]:
     ]
 
 
+def _event_to_route_response(event: Event) -> RouteEventResponse:
+    return RouteEventResponse(
+        event_id=event.event_id,
+        room=event.room,
+        tier=event.tier,
+        assigned_staff_id=event.assigned_staff_id,
+        eta=event.eta,
+        fatigue_score_at_assignment=event.fatigue_score_at_assignment,
+        status=event.status,
+    )
+
+
 def _build_dashboard_state() -> DashboardStateResponse:
-    """Shared by the one-off endpoint and every tick of the SSE stream —
-    one atomic snapshot, one lock acquisition, one `now`."""
     with store.routing_lock():
         now = datetime.utcnow()
-        store.advance_simulation(now)
-        staff_items = [_staff_to_response(s, now) for s in store.all_staff()]
+        engine.tick(now)
+        staff_items = [_staff_to_response(s, now) for s in store.all_staff_raw()]
         event_items = _events_to_items(now)
 
     return DashboardStateResponse(
@@ -203,19 +199,6 @@ def _build_dashboard_state() -> DashboardStateResponse:
 
 
 async def _dashboard_state_event_stream() -> AsyncIterator[str]:
-    """SSE generator: pushes a full DashboardStateResponse the instant the
-    connection opens, then again every time store._signal_change() fires
-    (an explicit write, or a lazy time-based transition discovered by this
-    loop's own advance_simulation() call), with SSE_TICK_SECONDS as a
-    safety-net ceiling so lazy transitions and connection keep-alives
-    never wait longer than that even with zero explicit signals.
-
-    Every tick sends real data (not a bare comment) even when nothing
-    material changed, because fatigue_score/hours_in_shift are
-    continuously-drifting floats — at real-time pacing that drift IS the
-    update, not noise, and doubles as the SSE keep-alive so intermediate
-    proxies don't time out an idle-looking connection.
-    """
     while True:
         state = _build_dashboard_state()
         yield f"data: {state.model_dump_json()}\n\n"
@@ -229,26 +212,11 @@ async def demo_config() -> DemoConfigResponse:
 
 @router.get("/dashboard-state", response_model=DashboardStateResponse)
 async def dashboard_state() -> DashboardStateResponse:
-    """One-off atomic read. Prefer /dashboard-stream for anything that
-    stays open and wants live updates — this is for a single current
-    snapshot."""
     return _build_dashboard_state()
 
 
 @router.get("/dashboard-stream")
 async def dashboard_stream() -> StreamingResponse:
-    """Server-Sent Events stream of DashboardStateResponse snapshots.
-    Replaces client-side polling: instead of every client independently
-    asking "what's true now?" every N seconds, the backend pushes the
-    instant something actually changes (bounded by SSE_TICK_SECONDS as a
-    ceiling, not a floor). One central loop drives every connected
-    client, rather than N clients each running their own timer.
-
-    Headers: no-cache and X-Accel-Buffering:no ask any intermediate
-    proxy (Render's included) not to buffer the stream — buffering would
-    turn "push the instant it changes" back into "wait for a chunk to
-    fill up," defeating the point.
-    """
     return StreamingResponse(
         _dashboard_state_event_stream(),
         media_type="text/event-stream",
@@ -269,6 +237,7 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
     )
     return RouteEventResponse(
         event_id=result.event_id,
+        room=payload.room,
         tier=result.tier,
         assigned_staff_id=result.assigned_staff_id,
         eta=result.eta,
@@ -280,15 +249,14 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
 @router.get("/staff-positions", response_model=list[StaffPositionItem])
 async def staff_positions() -> list[StaffPositionItem]:
     now = datetime.utcnow()
-    # NOTE: kept for backwards compatibility. /dashboard-stream is the
-    # primary path now; this and /events remain for any client that just
-    # wants a one-off poll.
-    return [_staff_to_response(s, now) for s in store.all_staff()]
+    engine.tick(now)
+    return [_staff_to_response(s, now) for s in store.all_staff_raw()]
 
 
 @router.get("/events", response_model=list[EventItem])
 async def list_events() -> list[EventItem]:
     now = datetime.utcnow()
+    engine.tick(now)
     return _events_to_items(now)
 
 
@@ -301,14 +269,9 @@ async def clear_assignment(payload: ClearAssignmentRequest) -> ClearAssignmentRe
 
     reassigned_response = None
     if reassigned is not None:
-        reassigned_response = RouteEventResponse(
-            event_id=reassigned.event_id,
-            tier=reassigned.tier,
-            assigned_staff_id=reassigned.assigned_staff_id,
-            eta=reassigned.eta,
-            fatigue_score_at_assignment=reassigned.fatigue_score_at_assignment,
-            status=reassigned.status,
-        )
+        reassigned_event = store.get_event(reassigned.event_id)
+        if reassigned_event is not None:
+            reassigned_response = _event_to_route_response(reassigned_event)
 
     return ClearAssignmentResponse(
         event_id=payload.event_id,
