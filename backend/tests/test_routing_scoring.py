@@ -192,3 +192,29 @@ class TestEngineIntegration:
         assert staff is not None
         assert staff.status == "available"
         assert len(staff.task_history) == 1
+
+    def test_pending_event_is_saved_and_visible(self):
+        # Occupy all staff with routine Tier 3 tasks so the next event must
+        # be queued as pending rather than blocking the submit path.
+        room_cycle = ["101", "102", "103", "104", "105", "106", "108"]
+        for room in room_cycle:
+            result = engine.route_event_sequential(
+                room=room,
+                symptom_tags=["needs bandage"],
+                submitted_at=NOW,
+            )
+            assert result.status == "assigned"
+
+        pending_result = engine.route_event_sequential(
+            room="110",
+            symptom_tags=["needs bandage"],
+            submitted_at=NOW + timedelta(seconds=1),
+        )
+        assert pending_result.status == "pending"
+
+        event = store.get_event(pending_result.event_id)
+        assert event is not None
+        assert event.status == "pending"
+
+        all_pending = [e for e in store.all_events() if e.status == "pending"]
+        assert any(e.event_id == pending_result.event_id for e in all_pending)
