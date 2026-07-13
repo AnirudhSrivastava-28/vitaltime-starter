@@ -12,16 +12,36 @@ from app.routing.scoring import select_candidate
 
 def _assign_event(event: Event, now: datetime) -> AssignmentResult:
     events_by_id = {e.event_id: e for e in store.all_events_raw()}
+    staff_pool = store.all_staff_raw()
+
     candidates = filters.build_candidates(
-        staff_pool=store.all_staff_raw(),
+        staff_pool=staff_pool,
         event=event,
         events_by_id=events_by_id,
         now=now,
+        # Tier 2/3: try the exact-qualification pool first (CNA/LPN) so a
+        # fresh, nearby RN doesn't out-score them on ETA/fatigue alone —
+        # RN capacity should default to reserved for Tier 1. Tier 1 is
+        # unaffected: "treatment" already only exactly matches RN, so
+        # this flag is a no-op there.
+        prefer_exact_qualification=(event.tier != 1),
     )
+
+    if not candidates and event.tier != 1:
+        # No CNA/LPN available at all — better to send the idle RN than
+        # leave a Validation/Normal event unassigned. Last resort, not
+        # the default.
+        candidates = filters.build_candidates(
+            staff_pool=staff_pool,
+            event=event,
+            events_by_id=events_by_id,
+            now=now,
+            prefer_exact_qualification=False,
+        )
 
     if not candidates and event.tier == 1:
         candidates = filters.build_candidates(
-            staff_pool=store.all_staff_raw(),
+            staff_pool=staff_pool,
             event=event,
             events_by_id=events_by_id,
             now=now,
