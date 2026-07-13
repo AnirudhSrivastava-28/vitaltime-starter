@@ -25,17 +25,6 @@ class StaffPosition:
 
 @dataclass
 class TransitPlan:
-    """A currently-in-progress move across the facility graph.
-
-    path/hop_times come from eta.shortest_path() — the same function used
-    for feasibility filtering — so the animation this drives is never a
-    client-side approximation; it's a rendering of the real routing
-    decision.
-
-    hop_times are in *sim minutes* (unscaled routing units, as used by the
-    scoring/filtering code). The API response layer scales these to real
-    wall-clock seconds via DEMO_TIME_SCALE for the client.
-    """
     path: list[str]
     hop_times: list[float]
     departure_time: datetime
@@ -66,20 +55,18 @@ class Event:
     status: EventStatus = "pending"
     assigned_staff_id: Optional[str] = None
     escalated_from: Optional[str] = None
-    # Set by the sim engine when the assigned staff arrives at the room;
-    # the event auto-resolves once wall-clock time passes this timestamp.
     tending_until: Optional[datetime] = None
-    # Snapshot of the routing decision at the moment of assignment. Stored
-    # here (not just returned once in RouteEventResponse) so that any later
-    # read of this event — /events, /dashboard-state, a fresh poll after
-    # the client that submitted it is long gone — still has the numbers
-    # that justified the decision, instead of them only existing in a
-    # single HTTP response nobody may still be holding onto. Cleared back
-    # to None if the event is interrupted and returned to pending, since a
-    # stale eta/fatigue from the old assignment would be misleading once
-    # it's no longer actually assigned to anyone.
     eta: Optional[float] = None
     fatigue_score_at_assignment: Optional[float] = None
+    # Best-effort prediction of which busy staff member will free up
+    # soonest, set only while status == "pending" and every qualified
+    # candidate is currently uninterruptible-busy (e.g. both RNs already
+    # on other Tier 1s). This is NOT a reservation — the actual retry
+    # when someone frees up still goes through normal scoring/priority
+    # and may pick someone else if circumstances changed. Purely so the
+    # UI can show "next up: RN-001, ~90s" instead of a black hole.
+    # Cleared back to None the moment the event is actually assigned.
+    predicted_next_staff_id: Optional[str] = None
 
 
 @dataclass
@@ -98,3 +85,4 @@ class AssignmentResult:
     eta: Optional[float]
     fatigue_score_at_assignment: Optional[float]
     status: EventStatus
+    predicted_next_staff_id: Optional[str] = None
