@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -16,13 +16,6 @@ from app.routing.store import DEMO_TIME_SCALE, sim_minutes_to_real_seconds
 
 router = APIRouter(tags=["routing"])
 
-# Safety-net interval for the SSE loop: even with zero explicit writes,
-# the stream still needs to periodically call advance_simulation() itself
-# to discover lazy time-based transitions (arrivals, tending completing,
-# etc.) — nothing else does this once clients stop polling. In between,
-# store._signal_change() wakes the loop immediately on any real change,
-# so this interval is a ceiling on latency for time-based transitions,
-# not the normal case.
 SSE_TICK_SECONDS = 1.0
 
 
@@ -34,12 +27,6 @@ class RouteEventRequest(BaseModel):
     @field_validator("submitted_at")
     @classmethod
     def _ensure_naive_utc(cls, v: datetime) -> datetime:
-        """Clients may send an offset (e.g. a trailing 'Z'), which Pydantic
-        parses into a timezone-aware datetime. Everything internally is
-        naive UTC (datetime.utcnow()) — normalize once, here, at the
-        boundary, so nothing downstream ever has to reconcile aware vs
-        naive. Mixing the two raises TypeError on comparison, which is
-        exactly what was crashing /events and /staff-positions."""
         if v.tzinfo is not None:
             v = v.astimezone(timezone.utc).replace(tzinfo=None)
         return v
@@ -53,6 +40,12 @@ class RouteEventResponse(BaseModel):
     eta: Optional[float]
     fatigue_score_at_assignment: Optional[float]
     status: Literal["pending", "assigned", "resolved", "escalated"]
+    # Best-effort — only ever non-null while status == "pending" and every
+    # qualified candidate is currently uninterruptible-busy. Not a
+    # reservation; see engine._predict_next_available_staff for the
+    # exact semantics. Lets the client show "next up: RN-001, ~90s"
+    # instead of a bare "pending" with no further information.
+    predicted_next_staff_id: Optional[str] = None
 
 
 class StaffPositionResponse(BaseModel):
@@ -61,8 +54,8 @@ class StaffPositionResponse(BaseModel):
 
 class TransitPlanResponse(BaseModel):
     path: list[str]
-    hop_times: list[float]              # cumulative SIM minutes (for backwards compat)
-    hop_durations_seconds: list[float]  # cumulative REAL wall-clock seconds (client uses these)
+    hop_times: list[float]
+    hop_durations_seconds: list[float]
     departure_time: datetime
     arrival_time: datetime
     mode: Literal["outbound", "return"]
@@ -93,8 +86,7 @@ class EventItem(BaseModel):
     tending_until: Optional[datetime] = None
     eta: Optional[float] = None
     fatigue_score_at_assignment: Optional[float] = None
-
-
+    predicted_next_staff_id: Optional[str] = None
 
 
 class ClearAssignmentRequest(BaseModel):
@@ -108,25 +100,11 @@ class ClearAssignmentResponse(BaseModel):
 
 
 class DemoConfigResponse(BaseModel):
-    """Timing metadata the client uses to interpret timestamps.
-    Exposing this makes the animation resilient to future scale changes —
-    the frontend never hardcodes the multiplier."""
     time_scale: float
     poll_interval_ms: int = 1500
 
 
 class DashboardStateResponse(BaseModel):
-    """Atomic snapshot of staff + events computed from a *single*
-    advance_simulation() tick, under one lock acquisition, so the two
-    can never reflect two different instants of sim state.
-
-    Served two ways:
-      - GET /dashboard-state: one-off fetch (kept for any client that
-        just wants a single current read, e.g. a debug tool).
-      - GET /dashboard-stream: this same payload pushed over SSE the
-        instant something changes, instead of a client polling for it.
-        This is the primary path now — see dashboard_stream() below.
-    """
     server_time: datetime
     time_scale: float
     staff: list[StaffPositionItem]
@@ -181,14 +159,13 @@ def _events_to_items(now: datetime) -> list[EventItem]:
             tending_until=e.tending_until,
             eta=e.eta,
             fatigue_score_at_assignment=e.fatigue_score_at_assignment,
+            predicted_next_staff_id=e.predicted_next_staff_id,
         )
         for e in events
     ]
 
 
 def _build_dashboard_state() -> DashboardStateResponse:
-    """Shared by the one-off endpoint and every tick of the SSE stream —
-    one atomic snapshot, one lock acquisition, one `now`."""
     with store.routing_lock():
         now = datetime.utcnow()
         engine.tick(now)
@@ -204,19 +181,6 @@ def _build_dashboard_state() -> DashboardStateResponse:
 
 
 async def _dashboard_state_event_stream() -> AsyncIterator[str]:
-    """SSE generator: pushes a full DashboardStateResponse the instant the
-    connection opens, then again every time store._signal_change() fires
-    (an explicit write, or a lazy time-based transition discovered by this
-    loop's own advance_simulation() call), with SSE_TICK_SECONDS as a
-    safety-net ceiling so lazy transitions and connection keep-alives
-    never wait longer than that even with zero explicit signals.
-
-    Every tick sends real data (not a bare comment) even when nothing
-    material changed, because fatigue_score/hours_in_shift are
-    continuously-drifting floats — at real-time pacing that drift IS the
-    update, not noise, and doubles as the SSE keep-alive so intermediate
-    proxies don't time out an idle-looking connection.
-    """
     while True:
         state = _build_dashboard_state()
         yield f"data: {state.model_dump_json()}\n\n"
@@ -229,27 +193,17 @@ async def demo_config() -> DemoConfigResponse:
 
 
 @router.get("/dashboard-state", response_model=DashboardStateResponse)
-async def dashboard_state() -> DashboardStateResponse:
-    """One-off atomic read. Prefer /dashboard-stream for anything that
-    stays open and wants live updates — this is for a single current
-    snapshot."""
+async def dashboard_state(response: Response) -> DashboardStateResponse:
+    # No caching layer should ever serve a stale snapshot for this
+    # endpoint — see the dashboard.html patch notes for why this
+    # mattered even on a single instance (uncached-by-default is not the
+    # same as guaranteed-not-cached by some intermediate proxy).
+    response.headers["Cache-Control"] = "no-store"
     return _build_dashboard_state()
 
 
 @router.get("/dashboard-stream")
 async def dashboard_stream() -> StreamingResponse:
-    """Server-Sent Events stream of DashboardStateResponse snapshots.
-    Replaces client-side polling: instead of every client independently
-    asking "what's true now?" every N seconds, the backend pushes the
-    instant something actually changes (bounded by SSE_TICK_SECONDS as a
-    ceiling, not a floor). One central loop drives every connected
-    client, rather than N clients each running their own timer.
-
-    Headers: no-cache and X-Accel-Buffering:no ask any intermediate
-    proxy (Render's included) not to buffer the stream — buffering would
-    turn "push the instant it changes" back into "wait for a chunk to
-    fill up," defeating the point.
-    """
     return StreamingResponse(
         _dashboard_state_event_stream(),
         media_type="text/event-stream",
@@ -276,15 +230,13 @@ async def route_event(payload: RouteEventRequest) -> RouteEventResponse:
         eta=result.eta,
         fatigue_score_at_assignment=result.fatigue_score_at_assignment,
         status=result.status,
+        predicted_next_staff_id=result.predicted_next_staff_id,
     )
 
 
 @router.get("/staff-positions", response_model=list[StaffPositionItem])
 async def staff_positions() -> list[StaffPositionItem]:
     now = datetime.utcnow()
-    # NOTE: kept for backwards compatibility. /dashboard-stream is the
-    # primary path now; this and /events remain for any client that just
-    # wants a one-off poll.
     return [_staff_to_response(s, now) for s in store.all_staff()]
 
 
@@ -313,6 +265,7 @@ async def clear_assignment(payload: ClearAssignmentRequest) -> ClearAssignmentRe
             eta=reassigned.eta,
             fatigue_score_at_assignment=reassigned.fatigue_score_at_assignment,
             status=reassigned.status,
+            predicted_next_staff_id=reassigned.predicted_next_staff_id,
         )
 
     return ClearAssignmentResponse(
