@@ -454,8 +454,9 @@ function timeAgo(iso) {
    timestamps the client is interpolating against, so backend truth and
    frontend animation stay in sync by construction — AS LONG AS the staff
    list and the events list the client holds describe the same instant of
-   backend state. That guarantee now comes from /dashboard-state (a single
-   atomic snapshot) instead of two independently-timed requests.
+   backend state. That guarantee comes from /dashboard-state / the SSE
+   stream (a single atomic snapshot per emission) rather than stitching
+   together independently-timed requests.
    ========================================================================= */
 let latestStaff = [];
 let latestEvents = [];
@@ -464,12 +465,12 @@ const eventsById = () => Object.fromEntries(latestEvents.map(e => [e.event_id, e
 /* Chips glide toward their true computed position instead of snapping to
    it every frame. This matters at phase-transition moments specifically —
    e.g. the instant a return trip is first observed, its departure_time
-   may already be up to one poll-interval in the past (see store.py's
-   advance_simulation docstring), so the "true" position on first render
-   can already be significantly down the path, or even at the destination.
-   Snapping straight there looks like teleporting. Gliding converges to
-   the true position within ~200-300ms — fast enough to stay accurate,
-   slow enough to read as continuous motion instead of a jump. */
+   may already be up to one tick in the past, so the "true" position on
+   first render can already be significantly down the path, or even at
+   the destination. Snapping straight there looks like teleporting.
+   Gliding converges to the true position within ~200-300ms — fast enough
+   to stay accurate, slow enough to read as continuous motion instead of
+   a jump. */
 const CHIP_LERP = 0.22;
 let chipRenderState = {}; // staffId -> {x, y}, the currently-drawn position
 
@@ -619,7 +620,7 @@ requestAnimationFrame(renderFrame);
 /* =========================================================================
    Halo rendering — idempotent. Never clears everything and re-adds; only
    updates existing halos in place. Avoids single-frame flashes even if a
-   poll response is momentarily stale.
+   frame is momentarily stale.
    ========================================================================= */
 function renderRoomHalos(events) {
   const activeByRoom = {};
@@ -664,10 +665,10 @@ function displayStatus(e) {
   return e.status;
 }
 
-/* Keyed by event_id so a poll that changes nothing doesn't touch the DOM
-   at all, and a poll that changes one event's status only touches that
-   one row — instead of destroying and recreating all 40 rows every 800ms,
-   which is what was causing the "popping in and out" flicker. */
+/* Keyed by event_id so a frame that changes nothing doesn't touch the DOM
+   at all, and a frame that changes one event's status only touches that
+   one row — instead of destroying and recreating all 40 rows on every
+   update, which is what was causing the "popping in and out" flicker. */
 const eventFeedNodes = new Map(); // event_id -> row element
 
 function renderEventFeed(events) {
@@ -722,8 +723,8 @@ function renderEventFeed(events) {
     const roomText = `Room ${e.room}`;
     if (roomEl.textContent !== roomText) roomEl.textContent = roomText;
 
-    // Time-ago text changes every second regardless of poll data, so it's
-    // always written (cheap — just a textContent set, no layout thrash).
+    // Time-ago text changes every second regardless of push cadence, so
+    // it's always written (cheap — just a textContent set, no layout thrash).
     node.querySelector(".event-time").textContent = timeAgo(e.submitted_at);
 
     const tagsEl = node.querySelector(".event-tags");
@@ -830,7 +831,10 @@ function renderStaffRoster(staff) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ event_id: btn.dataset.event }),
           });
-          await poll();
+          // No manual refetch needed — clearing an assignment fires
+          // notify_state_change() on the backend, and the open SSE
+          // connection pushes the resulting state (including any
+          // reassigned_pending event) on its own.
         } catch (err) {
           btn.textContent = "Failed — retry";
           btn.disabled = false;
@@ -858,7 +862,7 @@ function renderStaffRoster(staff) {
     if (showBtn) {
       btn.dataset.event = s.current_event_id;
       // Don't stomp "Clearing…"/"Failed — retry" text mid-request by
-      // re-rendering it back to the default label on the next poll.
+      // re-rendering it back to the default label on the next frame.
       if (!btn.disabled) btn.textContent = "Clear assignment";
     } else {
       btn.disabled = false;
@@ -881,42 +885,63 @@ function renderStaffRoster(staff) {
 }
 
 /* =========================================================================
-   Polling.
+   Live stream — replaces the old 800ms polling loop.
 
-   The dashboard reads /dashboard-state — one atomic snapshot (staff +
-   events + server_time), computed under a single lock acquisition on a
-   single `now`, on the backend. That's what makes the animation and the
-   event/roster panels consistent with each other; there is no longer a
-   race between two independently-timed requests to reconcile client-side.
+   Previously this dashboard called GET /dashboard-state on a setInterval,
+   which meant every single update was a brand-new independent HTTP
+   request. If more than one backend instance is ever running behind a
+   load balancer, each of those requests can land on a *different*
+   instance — each with its own separate, internally-consistent
+   `_staff`/`_events` in-memory state — and the old `server_time`
+   monotonic guard couldn't catch that, because a newer timestamp from a
+   different instance's reality still looks "newer than the last." That
+   produced exactly the flicker-between-two-states symptom.
 
-   The only thing left to guard against is a poll response arriving out of
-   order (e.g. a retried request landing after a newer one) — handled with
-   a simple monotonic check on the snapshot's own `server_time`, rather
-   than guessing at staff/event consistency heuristically.
+   EventSource opens ONE persistent connection to /dashboard-stream and
+   keeps reading from it. Whichever instance answers the initial
+   connection is the one this dashboard stays pinned to for the life of
+   that connection — the same behavior the iOS app already has via its
+   own SSE stream. This doesn't make cross-instance drift impossible (if
+   the dashboard and iOS each get pinned to a *different* instance, and
+   more than one instance is really running, they can still disagree with
+   each other) — but it stops this dashboard from re-rolling that dice
+   every 800ms against itself, and reduces the whole problem to "is more
+   than one instance running," which is a deployment setting, not
+   something more client code can paper over.
+
+   The backend already sends a real payload on every ~1s tick even with
+   no material change (fatigue/hours drift continuously), which doubles
+   as an SSE keep-alive — so onerror firing means the connection is
+   actually gone, not just quiet.
    ========================================================================= */
-const POLL_MS = 800;
-
-async function fetchJSON(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
-  return res.json();
-}
-
-let pollFailures = 0;
-let pollInFlight = false;
+let eventSource = null;
 let lastServerTimeMs = 0;
 
-async function poll() {
-  if (pollInFlight) return;
-  pollInFlight = true;
-  try {
-    const state = await fetchJSON("/dashboard-state");
-    const serverTimeMs = parseUTC(state.server_time).getTime();
+function connectStream() {
+  if (eventSource) {
+    eventSource.close();
+  }
 
-    // Reject only genuinely out-of-order responses (older snapshot than
-    // one we've already rendered). Everything else is trusted as-is,
-    // since it's a single atomic read rather than a stitched-together
-    // guess.
+  eventSource = new EventSource("/dashboard-stream");
+
+  eventSource.onopen = () => {
+    document.getElementById("conn-status").textContent = "live";
+    document.getElementById("pulse-mark").style.background = "var(--tier3)";
+  };
+
+  eventSource.onmessage = (ev) => {
+    let state;
+    try {
+      state = JSON.parse(ev.data);
+    } catch (err) {
+      console.error("[VitalTime] Failed to parse SSE payload", err, ev.data);
+      return;
+    }
+
+    const serverTimeMs = parseUTC(state.server_time).getTime();
+    // Ordering-only guard now (protects against a stray out-of-order
+    // frame on the same connection) — not compensating for cross-
+    // instance content drift the way it had to under polling.
     if (serverTimeMs < lastServerTimeMs) {
       return;
     }
@@ -928,28 +953,28 @@ async function poll() {
     renderEventFeed(latestEvents);
     renderStaffRoster(latestStaff);
     document.getElementById("sim-scale-tag").textContent = `sim × ${state.time_scale}`;
+  };
 
-    pollFailures = 0;
-    document.getElementById("conn-status").textContent = "live";
-    document.getElementById("pulse-mark").style.background = "var(--tier3)";
-  } catch (err) {
-    pollFailures += 1;
-    document.getElementById("conn-status").textContent =
-      pollFailures > 2 ? "connection lost" : "reconnecting…";
+  eventSource.onerror = () => {
+    // Native EventSource retries the connection on its own after an
+    // error (default backoff ~3s, per the HTML spec) — no manual retry
+    // loop or failure counter needed here, unlike the old polling
+    // implementation. This just reflects connection state in the UI.
+    document.getElementById("conn-status").textContent = "reconnecting…";
     document.getElementById("pulse-mark").style.background = "var(--tier1)";
-  } finally {
-    pollInFlight = false;
-  }
+  };
+}
+
+async function fetchJSON(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  return res.json();
 }
 
 /* =========================================================================
    Boot
    ========================================================================= */
-async function bootstrap() {
-  await poll();
-  setInterval(poll, POLL_MS);
-}
-bootstrap();
+connectStream();
 
 function tickClock() {
   document.getElementById("clock").textContent = new Date().toLocaleTimeString();
@@ -967,8 +992,11 @@ document.getElementById("reset-btn").addEventListener("click", async () => {
   eventFeedNodes.clear();
   staffRosterNodes.forEach(node => node.remove());
   staffRosterNodes.clear();
-  lastServerTimeMs = 0; // next snapshot is always "newer" than nothing
-  await poll();
+  lastServerTimeMs = 0; // next frame is always "newer" than nothing
+  // No explicit refetch — reset_simulation() fires notify_state_change()
+  // on the backend, and the open SSE connection pushes the fresh
+  // post-reset snapshot on its own, typically before this handler even
+  // finishes.
 });
 </script>
 </body>
