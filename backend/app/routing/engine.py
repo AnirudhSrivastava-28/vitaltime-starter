@@ -10,6 +10,55 @@ from app.routing.models import AssignmentResult, Event
 from app.routing.scoring import select_candidate
 
 
+def _predict_next_available_staff(event: Event, now: datetime) -> Optional[str]:
+    """Best-effort prediction of which qualified-but-busy staff member
+    will free up soonest, for pending events where every candidate is
+    currently uninterruptible-busy (the only way this happens today:
+    a Tier 1 arriving while every RN is already on another Tier 1).
+
+    NOT a reservation — when someone actually frees up, the normal
+    scoring/priority path in _process_pending runs as usual and may pick
+    a different (or no) candidate if circumstances changed in the
+    meantime (e.g. the predicted staff member gets interrupted by a
+    different emergency first). This exists purely so pending events
+    aren't a black hole to the UI — "next up: RN-001, ~90s" instead of
+    just "pending" with no indication of what happens next. Recomputed
+    on every retry, so it stays live rather than going stale.
+    """
+    events_by_id = {e.event_id: e for e in store.all_events_raw()}
+    best_staff_id: Optional[str] = None
+    best_free_time: Optional[datetime] = None
+
+    for staff in store.all_staff_raw():
+        if not filters.meets_qualification(staff, event.tier):
+            continue
+        if staff.status != "busy" or not staff.current_event_id or staff.transit is None:
+            continue
+
+        current_event = events_by_id.get(staff.current_event_id)
+        if current_event is None:
+            continue
+
+        if current_event.tending_until is not None:
+            # Already arrived and tending — this is exactly when they'll
+            # become available again.
+            free_time = current_event.tending_until
+        else:
+            # Still en route — estimate arrival + this event's tending
+            # duration, same formula store.py's own lifecycle sim uses.
+            arrival = staff.transit.departure_time + store.sim_timedelta(
+                staff.transit.hop_times[-1]
+            )
+            tending_minutes = store.TENDING_MINUTES_BY_TIER.get(current_event.tier, 3.0)
+            free_time = arrival + store.sim_timedelta(tending_minutes)
+
+        if best_free_time is None or free_time < best_free_time:
+            best_free_time = free_time
+            best_staff_id = staff.staff_id
+
+    return best_staff_id
+
+
 def _assign_event(event: Event, now: datetime) -> AssignmentResult:
     events_by_id = {e.event_id: e for e in store.all_events_raw()}
     staff_pool = store.all_staff_raw()
@@ -51,6 +100,7 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
     chosen = select_candidate(candidates, tier=event.tier) if candidates else None
     if chosen is None:
         event.status = "pending"
+        event.predicted_next_staff_id = _predict_next_available_staff(event, now)
         store.enqueue_pending(event.event_id)
         return AssignmentResult(
             event_id=event.event_id,
@@ -59,6 +109,7 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
             eta=None,
             fatigue_score_at_assignment=None,
             status="pending",
+            predicted_next_staff_id=event.predicted_next_staff_id,
         )
 
     if chosen.interruptible:
@@ -73,6 +124,9 @@ def _assign_event(event: Event, now: datetime) -> AssignmentResult:
         eta_minutes=chosen.eta,
         fatigue_score_at_assignment=chosen.fatigue,
     )
+    # No longer relevant once actually assigned — clear the prediction
+    # rather than leaving a stale value from a previous pending stretch.
+    event.predicted_next_staff_id = None
 
     return AssignmentResult(
         event_id=event.event_id,
