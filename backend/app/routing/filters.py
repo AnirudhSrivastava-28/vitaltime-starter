@@ -16,10 +16,27 @@ def meets_qualification(staff: Staff, tier: int) -> bool:
     return QUAL_RANK[staff.qualification_level] >= QUAL_RANK[required]
 
 
+def meets_qualification_exact(staff: Staff, tier: int) -> bool:
+    """True if staff isn't over-qualified for this tier's actual roster.
+
+    NOTE: this can't be a literal string match against
+    TIER_REQUIRED_QUAL — ROLE_QUALIFICATION maps both CNA and LPN to
+    "assessment", and no role is ever assigned the literal "task" level.
+    TIER_REQUIRED_QUAL[3] == "task" therefore matches zero real staff by
+    string equality; a naive exact-match implementation silently falls
+    through to the unrestricted pool every time for Tier 3, which is
+    what happened on the first pass of this fix. The practically correct
+    meaning of "exact" here is "not strictly over-qualified": exclude
+    only staff whose rank exceeds the highest rank actually used by any
+    non-RN role ("assessment"), so RN is reserved for Tier 1 while CNA
+    and LPN both remain eligible for Tier 2 and Tier 3 as intended.
+    """
+    if tier == 1:
+        return staff.qualification_level == TIER_REQUIRED_QUAL[1]
+    return QUAL_RANK[staff.qualification_level] <= QUAL_RANK["assessment"]
+
+
 def is_time_feasible(staff: Staff, event: Event, now: datetime) -> tuple[bool, float]:
-    """Feasibility and ETA computed from the staff member's *true* current
-    position — resolve_room accounts for in-progress transit rather than
-    trusting a destination they haven't physically reached yet."""
     origin = eta.resolve_room(staff, now, time_scale=DEMO_TIME_SCALE)
     travel_minutes = eta.eta_minutes(origin, event.room)
     window = RESPONSE_WINDOWS[event.tier]
@@ -28,12 +45,11 @@ def is_time_feasible(staff: Staff, event: Event, now: datetime) -> tuple[bool, f
 
 def is_available_for_tier(staff: Staff, tier: int) -> bool:
     if tier == 1:
-        return True  # Tier 1 may interrupt (checked separately)
+        return True
     return staff.status == "available"
 
 
 def can_interrupt(staff: Staff, events_by_id: dict[str, Event]) -> bool:
-    """Tier 1 may interrupt staff busy on a lower-tier (2/3) event."""
     if staff.status != "busy" or not staff.current_event_id:
         return False
     current = events_by_id.get(staff.current_event_id)
@@ -49,12 +65,15 @@ def build_candidates(
     now: datetime,
     *,
     enforce_window: bool = True,
+    prefer_exact_qualification: bool = False,
 ) -> list[Candidate]:
-    """Apply hard filters and produce surviving candidates with ETA/fatigue."""
     candidates: list[Candidate] = []
 
     for staff in staff_pool:
         if not meets_qualification(staff, event.tier):
+            continue
+
+        if prefer_exact_qualification and not meets_qualification_exact(staff, event.tier):
             continue
 
         feasible, eta_val = is_time_feasible(staff, event, now)
