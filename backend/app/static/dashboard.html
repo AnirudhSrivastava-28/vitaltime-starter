@@ -239,6 +239,11 @@
   .status-pill.resolved  { background: #ffffff10; color: var(--ink-faint); }
   .status-pill.escalated { background: #E23D4520; color: var(--tier1); }
 
+  .event-assigned-predicted {
+    color: var(--ink-faint);
+    font-style: italic;
+  }
+
   .empty-state {
     color: var(--ink-faint);
     font-size: 13px;
@@ -737,8 +742,20 @@ function renderEventFeed(events) {
     if (pill.textContent !== status) pill.textContent = status;
 
     const assignedEl = node.querySelector(".event-assigned");
-    const assignedText = e.assigned_staff_id ? `\u2192 ${e.assigned_staff_id}` : "";
+    // Reuse this span for two related-but-distinct facts: who's actually
+    // assigned, or — only while pending with every qualified candidate
+    // uninterruptible-busy — who's predicted to pick this up next. Never
+    // both at once, since predicted_next_staff_id is only ever non-null
+    // while assigned_staff_id is null (see engine.py's
+    // _predict_next_available_staff docstring for the exact contract).
+    let assignedText = "";
+    if (e.assigned_staff_id) {
+      assignedText = `\u2192 ${e.assigned_staff_id}`;
+    } else if (status === "pending" && e.predicted_next_staff_id) {
+      assignedText = `next: ${e.predicted_next_staff_id}`;
+    }
     if (assignedEl.textContent !== assignedText) assignedEl.textContent = assignedText;
+    assignedEl.classList.toggle("event-assigned-predicted", !e.assigned_staff_id && !!e.predicted_next_staff_id);
 
     // Keep DOM order matching the sorted event list, but only move a node
     // when it's actually out of place.
