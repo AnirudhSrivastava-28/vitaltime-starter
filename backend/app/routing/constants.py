@@ -23,6 +23,8 @@ QUAL_RANK = {
 TIER_REQUIRED_QUAL = {
     1: "treatment",
     2: "assessment",
+    # "task" is the conceptual minimum for routine work; CNA/LPN roster
+    # entries are both represented as "assessment", so filtering uses rank.
     3: "task",
 }
 

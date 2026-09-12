@@ -79,37 +79,26 @@ def sim_timedelta(sim_minutes: float) -> timedelta:
 
 # ---- change notification (for SSE) ------------------------------------------
 
-# Created lazily rather than at import time: asyncio.Event() is fine to
-# construct before a loop exists (it no longer binds to a loop at
-# construction as of Python 3.10), but lazy creation keeps this module
-# importable in any context (e.g. plain sync test code) without assuming
-# an event loop is already running.
-_change_event: Optional[asyncio.Event] = None
-
-
-def _get_change_event() -> asyncio.Event:
-    global _change_event
-    if _change_event is None:
-        _change_event = asyncio.Event()
-    return _change_event
+# Each stream owns an event. A single shared event lets one subscriber clear
+# the notification before another subscriber wakes up.
+_change_subscribers: dict[asyncio.Event, asyncio.AbstractEventLoop] = {}
+_change_subscribers_lock = threading.Lock()
 
 
 def _signal_change() -> None:
-    """Wake any SSE subscribers waiting in wait_for_change(). Called from
-    every write path below, and from _advance_single_staff whenever a
-    lazy time-based transition actually fires. Cheap and safe to call
-    even with zero subscribers."""
-    _get_change_event().set()
-
-
-def _notify_sync_waiters() -> None:
-    with _state_change_condition:
-        _state_change_condition.notify_all()
+    """Wake every SSE subscriber, including callers on worker threads."""
+    with _change_subscribers_lock:
+        subscribers = list(_change_subscribers.items())
+    for event, loop in subscribers:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            with _change_subscribers_lock:
+                _change_subscribers.pop(event, None)
 
 
 def notify_state_change() -> None:
     _signal_change()
-    _notify_sync_waiters()
 
 
 async def wait_for_change(timeout: float) -> bool:
@@ -120,19 +109,23 @@ async def wait_for_change(timeout: float) -> bool:
     timeout exists specifically to catch time-based transitions that
     happen with nobody having explicitly called _signal_change() for them
     yet, by forcing a periodic advance_simulation() regardless."""
-    ev = _get_change_event()
+    loop = asyncio.get_running_loop()
+    ev = asyncio.Event()
+    with _change_subscribers_lock:
+        _change_subscribers[ev] = loop
     try:
         await asyncio.wait_for(ev.wait(), timeout=timeout)
-        ev.clear()
         return True
     except asyncio.TimeoutError:
         return False
+    finally:
+        with _change_subscribers_lock:
+            _change_subscribers.pop(ev, None)
 
 
 # ---- store ------------------------------------------------------------------
 
 _lock = threading.RLock()
-_state_change_condition = threading.Condition()
 _staff: dict[str, Staff] = {}
 _events: dict[str, Event] = {}
 _pending_ids: list[str] = []
@@ -154,6 +147,13 @@ def _seed_staff(now: datetime) -> None:
     genuinely different staffing-fatigue scenario to route against instead
     of the same "who's freshest" call every time.
     """
+    seed_value = os.environ.get("VITALTIME_SEED")
+    rng: random.Random | random.SystemRandom
+    if seed_value is None:
+        rng = random.SystemRandom()
+    else:
+        rng = random.Random(int(seed_value))
+
     roster = [
         ("RN-001", "RN", "NS"),
         ("RN-002", "RN", "108"),
@@ -164,7 +164,7 @@ def _seed_staff(now: datetime) -> None:
         ("CNA-003", "CNA", "110"),
     ]
     for staff_id, role, room in roster:
-        shift_hours = random.uniform(*_SEED_SHIFT_HOURS_RANGE)
+        shift_hours = rng.uniform(*_SEED_SHIFT_HOURS_RANGE)
         shift_start = now - timedelta(hours=shift_hours)
 
         staff = Staff(
@@ -176,9 +176,9 @@ def _seed_staff(now: datetime) -> None:
             home_room=room,
         )
 
-        task_count = random.choices(_SEED_TASK_COUNT_CHOICES, weights=_SEED_TASK_COUNT_WEIGHTS)[0]
+        task_count = rng.choices(_SEED_TASK_COUNT_CHOICES, weights=_SEED_TASK_COUNT_WEIGHTS)[0]
         for _ in range(task_count):
-            minutes_ago = random.uniform(*_SEED_TASK_AGE_MINUTES_RANGE)
+            minutes_ago = rng.uniform(*_SEED_TASK_AGE_MINUTES_RANGE)
             staff.task_history.append(
                 TaskHistoryEntry(
                     event_id=f"seed-{staff_id}-{uuid.uuid4().hex[:8]}",
@@ -290,7 +290,7 @@ def _advance_single_staff(staff: Staff, now: datetime) -> bool:
     return freed
 
 
-def register_pending_retry_hook(fn: callable[[datetime], None]) -> None:
+def register_pending_retry_hook(fn: Callable[[datetime], None]) -> None:
     global _pending_retry_hook
     _pending_retry_hook = fn
 
@@ -513,11 +513,6 @@ def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
         event.fatigue_score_at_assignment = None
     notify_state_change()
     return event
-
-
-def wait_for_state_change(timeout: float = 60.0) -> bool:
-    with _state_change_condition:
-        return _state_change_condition.wait(timeout=timeout)
 
 
 def routing_lock() -> threading.RLock:

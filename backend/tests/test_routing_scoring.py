@@ -15,7 +15,8 @@ from app.routing.constants import (
     TASK_JUMP,
 )
 from app.routing.fatigue import compute_fatigue, elapsed_fatigue, workload_fatigue
-from app.routing.models import Candidate, Staff, StaffPosition, TaskHistoryEntry
+from app.routing.models import Candidate, Event, Staff, StaffPosition, TaskHistoryEntry
+from app.routing.filters import build_candidates
 from app.routing.scoring import score_tier2, score_tier3, select_candidate
 from app.routing.tier import classify_tier
 from app.routing import engine, store
@@ -156,6 +157,24 @@ class TestEngineIntegration:
         )
         assert result.tier == 3
         assert result.status == "assigned"
+
+    def test_tier3_strict_pass_excludes_rn_until_fallback(self):
+        staff_pool = [_staff("RN-001"), _staff("CNA-001", role="CNA")]
+        event = Event(
+            event_id="tier3-regression",
+            room="NS",
+            tier=3,
+            symptom_tags=["routine"],
+            submitted_at=NOW,
+        )
+
+        strict = build_candidates(
+            staff_pool, event, {}, NOW, prefer_exact_qualification=True
+        )
+        fallback = build_candidates(staff_pool, event, {}, NOW)
+
+        assert [candidate.staff.staff_id for candidate in strict] == ["CNA-001"]
+        assert {candidate.staff.staff_id for candidate in fallback} == {"RN-001", "CNA-001"}
 
     def test_tier1_can_interrupt_busy_staff(self):
         # Tie up all RNs with tier 3 events

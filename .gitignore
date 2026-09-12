@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+xcuserdata/
+*.xcuserstate
