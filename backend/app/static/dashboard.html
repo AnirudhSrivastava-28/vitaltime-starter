@@ -90,6 +90,82 @@
     letter-spacing: 0.04em;
   }
 
+  /* ---------- simulation form ---------- */
+  .simulator {
+    display: grid;
+    grid-template-columns: minmax(190px, 0.8fr) minmax(150px, 0.6fr) minmax(260px, 1.4fr) auto;
+    align-items: end;
+    gap: 14px;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-panel);
+  }
+  .simulator-heading {
+    align-self: center;
+  }
+  .simulator-heading h2 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .simulator-heading p {
+    margin: 0;
+    color: var(--ink-muted);
+    font-size: 12px;
+  }
+  .simulator-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .simulator-field label {
+    color: var(--ink-muted);
+    font-family: var(--font-data);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .simulator-field select {
+    width: 100%;
+    appearance: none;
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--ink);
+    font: 13px var(--font-label);
+    padding: 10px 12px;
+  }
+  .simulator-field select:focus {
+    border-color: var(--role-rn);
+    outline: 2px solid #6C8EF533;
+  }
+  .simulator-submit {
+    border: 0;
+    border-radius: 8px;
+    background: var(--tier1);
+    color: white;
+    cursor: pointer;
+    font: 600 13px var(--font-label);
+    min-height: 39px;
+    padding: 0 18px;
+    transition: filter 0.15s, transform 0.15s;
+  }
+  .simulator-submit:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .simulator-submit:disabled { cursor: wait; filter: grayscale(0.35); opacity: 0.7; transform: none; }
+  .simulator-result {
+    grid-column: 1 / -1;
+    min-height: 18px;
+    color: var(--ink-muted);
+    font-family: var(--font-data);
+    font-size: 11px;
+  }
+  .simulator-result.success { color: var(--tier3); }
+  .simulator-result.error { color: var(--tier1); }
+  @media (max-width: 720px) {
+    .simulator { grid-template-columns: 1fr; }
+    .simulator-result { grid-column: auto; }
+  }
+
   /* ---------- tier legend strip ---------- */
   .legend {
     display: flex;
@@ -339,6 +415,23 @@
     <span class="item"><span class="dot" style="background:var(--role-cna)"></span>CNA</span>
   </div>
 
+  <section class="simulator" aria-labelledby="simulator-title">
+    <div class="simulator-heading">
+      <h2 id="simulator-title">Run a simulation</h2>
+      <p>Send the same event a staff member reports in VitalTime iOS.</p>
+    </div>
+    <div class="simulator-field">
+      <label for="simulation-room">Resident room</label>
+      <select id="simulation-room"></select>
+    </div>
+    <div class="simulator-field">
+      <label for="simulation-event">Event</label>
+      <select id="simulation-event"></select>
+    </div>
+    <button class="simulator-submit" id="simulation-submit" type="button">Submit event</button>
+    <div class="simulator-result" id="simulation-result" role="status" aria-live="polite"></div>
+  </section>
+
   <div class="body-grid">
     <div class="panel" id="facility-map">
       <p class="panel-title">Facility Map</p>
@@ -393,6 +486,24 @@ const EDGES = [
 ];
 const TIER_COLOR = { 1: "#E23D45", 2: "#E0A72E", 3: "#4FA98A" };
 const ROLE_COLOR = { RN: "#6C8EF5", LPN: "#B98CE0", CNA: "#58C4D6" };
+const SIMULATION_ROOMS = Array.from({ length: 12 }, (_, i) => String(101 + i));
+const SIMULATION_EVENTS = [
+  { label: "Not breathing", tier: 1, tags: ["not breathing"] },
+  { label: "Unresponsive", tier: 1, tags: ["unresponsive"] },
+  { label: "Cardiac arrest", tier: 1, tags: ["cardiac arrest"] },
+  { label: "Choking", tier: 1, tags: ["choking"] },
+  { label: "Seizure", tier: 1, tags: ["seizure"] },
+  { label: "Possible fall", tier: 2, tags: ["possible fall"] },
+  { label: "Confused / disoriented", tier: 2, tags: ["confused"] },
+  { label: "Chest pain", tier: 2, tags: ["chest pain"] },
+  { label: "Shortness of breath", tier: 2, tags: ["shortness of breath"] },
+  { label: "High fever", tier: 2, tags: ["high fever"] },
+  { label: "Needs bandage / minor bleeding", tier: 3, tags: ["needs bandage"] },
+  { label: "Escort request", tier: 3, tags: ["escort"] },
+  { label: "Medication refill", tier: 3, tags: ["medication refill"] },
+  { label: "Bathroom assist", tier: 3, tags: ["bathroom assist"] },
+  { label: "Comfort check", tier: 3, tags: ["comfort check"] },
+];
 
 /* Defensive lookup — NEVER return undefined. Any room the client doesn't
    recognize (a future graph mismatch, a bad seed, whatever) falls back to
@@ -988,9 +1099,72 @@ async function fetchJSON(path, opts) {
   return res.json();
 }
 
+function setupSimulationForm() {
+  const roomSelect = document.getElementById("simulation-room");
+  const eventSelect = document.getElementById("simulation-event");
+  const submitButton = document.getElementById("simulation-submit");
+  const result = document.getElementById("simulation-result");
+
+  SIMULATION_ROOMS.forEach(room => {
+    const option = document.createElement("option");
+    option.value = room;
+    option.textContent = `Room ${room}`;
+    roomSelect.appendChild(option);
+  });
+
+  SIMULATION_EVENTS.forEach((event, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = `Tier ${event.tier} · ${event.label}`;
+    eventSelect.appendChild(option);
+  });
+
+  const updateSubmitColor = () => {
+    const event = SIMULATION_EVENTS[Number(eventSelect.value)];
+    submitButton.style.background = TIER_COLOR[event.tier];
+  };
+  eventSelect.addEventListener("change", updateSubmitColor);
+  updateSubmitColor();
+
+  submitButton.addEventListener("click", async () => {
+    const event = SIMULATION_EVENTS[Number(eventSelect.value)];
+    submitButton.disabled = true;
+    submitButton.textContent = "Routing…";
+    result.className = "simulator-result";
+    result.textContent = `Sending Tier ${event.tier} event from Room ${roomSelect.value}…`;
+
+    try {
+      const response = await fetchJSON("/route-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: roomSelect.value,
+          symptom_tags: event.tags,
+          submitted_at: new Date().toISOString(),
+        }),
+      });
+      const assignment = response.assigned_staff_id
+        ? `assigned to ${response.assigned_staff_id}`
+        : response.predicted_next_staff_id
+          ? `pending · next up ${response.predicted_next_staff_id}`
+          : "pending";
+      result.className = "simulator-result success";
+      result.textContent = `Tier ${response.tier} event routed: ${assignment}.`;
+    } catch (error) {
+      result.className = "simulator-result error";
+      result.textContent = `Could not submit event: ${error.message}`;
+    } finally {
+      submitButton.disabled = false;
+      submitButton.textContent = "Submit event";
+      updateSubmitColor();
+    }
+  });
+}
+
 /* =========================================================================
    Boot
    ========================================================================= */
+setupSimulationForm();
 connectStream();
 
 function tickClock() {
