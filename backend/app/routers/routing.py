@@ -92,6 +92,10 @@ class ClearAssignmentRequest(BaseModel):
     event_id: str
 
 
+class EscalateEventRequest(BaseModel):
+    event_id: str
+
+
 class ClearAssignmentResponse(BaseModel):
     event_id: str
     status: Literal["resolved"]
@@ -271,6 +275,29 @@ async def clear_assignment(payload: ClearAssignmentRequest) -> ClearAssignmentRe
         event_id=payload.event_id,
         status="resolved",
         reassigned_pending=reassigned_response,
+    )
+
+
+@router.post("/escalate-event", response_model=RouteEventResponse)
+async def escalate_event(payload: EscalateEventRequest) -> RouteEventResponse:
+    result = engine.escalate_event(payload.event_id)
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Only active Tier 2 events can be escalated",
+        )
+    event = store.get_event(payload.event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return RouteEventResponse(
+        event_id=result.event_id,
+        room=event.room,
+        tier=result.tier,
+        assigned_staff_id=result.assigned_staff_id,
+        eta=result.eta,
+        fatigue_score_at_assignment=result.fatigue_score_at_assignment,
+        status=result.status,
+        predicted_next_staff_id=result.predicted_next_staff_id,
     )
 
 

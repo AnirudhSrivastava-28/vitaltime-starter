@@ -212,6 +212,43 @@ class TestEngineIntegration:
         assert staff.status == "available"
         assert len(staff.task_history) == 1
 
+    def test_tier2_event_can_be_escalated_to_tier1(self):
+        result = engine.route_event_sequential(
+            room="102",
+            symptom_tags=["possible fall"],
+            submitted_at=NOW,
+        )
+        assert result.status == "assigned"
+
+        escalated = engine.escalate_event(result.event_id, NOW + timedelta(seconds=1))
+
+        assert escalated is not None
+        assert escalated.tier == 1
+        assert escalated.status == "assigned"
+        event = store.get_event(result.event_id)
+        assert event is not None
+        assert event.tier == 1
+        assert event.escalated_from == 2
+        assert "escalated" in event.symptom_tags
+
+    def test_tending_event_resolves_after_tending_window(self):
+        started_at = datetime.utcnow()
+        result = engine.route_event_sequential(
+            room="102",
+            symptom_tags=["possible fall"],
+            submitted_at=started_at,
+        )
+        assert result.assigned_staff_id is not None
+        event = store.get_event(result.event_id)
+        assert event is not None
+
+        engine.tick(started_at + timedelta(minutes=10))
+
+        event = store.get_event(result.event_id)
+        assert event is not None
+        assert event.status == "resolved"
+        assert event.tending_until is not None
+
     def test_pending_event_is_saved_and_visible(self):
         # Occupy all staff with routine Tier 3 tasks so the next event must
         # be queued as pending rather than blocking the submit path.

@@ -515,5 +515,31 @@ def clear_assignment(event_id: str, now: datetime) -> Optional[Event]:
     return event
 
 
+def prepare_escalation(event_id: str) -> Optional[Event]:
+    """Return a non-resolved Tier 2 event to the pending state.
+
+    Releasing the current assignee is deliberately handled by the engine,
+    because it must preserve the normal pending-queue and reassignment flow.
+    This function owns the event mutation and validates the escalation
+    boundary while holding the store lock.
+    """
+    with _lock:
+        event = _events.get(event_id)
+        if event is None or event.status == "resolved" or event.tier != 2:
+            return None
+        event.tier = 1
+        event.escalated_from = 2
+        event.status = "pending"
+        event.assigned_staff_id = None
+        event.tending_until = None
+        event.eta = None
+        event.fatigue_score_at_assignment = None
+        event.predicted_next_staff_id = None
+        if "escalated" not in event.symptom_tags:
+            event.symptom_tags.append("escalated")
+    notify_state_change()
+    return event
+
+
 def routing_lock() -> threading.RLock:
     return _lock

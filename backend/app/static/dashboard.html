@@ -319,6 +319,21 @@
     color: var(--ink-faint);
     font-style: italic;
   }
+  .event-countdown {
+    color: var(--tier2);
+    font-size: 10px;
+  }
+  .escalate-btn {
+    border: 1px solid var(--tier2);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--tier2);
+    cursor: pointer;
+    font: 10px var(--font-label);
+    padding: 3px 7px;
+  }
+  .escalate-btn:hover { background: var(--tier2-dim); }
+  .escalate-btn:disabled { cursor: wait; opacity: 0.6; }
 
   .empty-state {
     color: var(--ink-faint);
@@ -781,6 +796,14 @@ function displayStatus(e) {
   return e.status;
 }
 
+function tendingCountdown(e) {
+  if (displayStatus(e) !== "tending" || !e.tending_until) return "";
+  const remaining = Math.max(0, Math.ceil((parseUTC(e.tending_until).getTime() - Date.now()) / 1000));
+  const minutes = Math.floor(remaining / 60);
+  const seconds = String(remaining % 60).padStart(2, "0");
+  return `resolves in ${minutes}:${seconds}`;
+}
+
 /* Keyed by event_id so a frame that changes nothing doesn't touch the DOM
    at all, and a frame that changes one event's status only touches that
    one row — instead of destroying and recreating all 40 rows on every
@@ -824,10 +847,29 @@ function renderEventFeed(events) {
           <div class="event-status-line">
             <span class="status-pill"></span>
             <span class="event-assigned"></span>
+            <span class="event-countdown"></span>
+            <button class="escalate-btn" type="button" hidden>Escalate to T1</button>
           </div>
         </div>
       `;
       eventFeedNodes.set(e.event_id, node);
+      node.querySelector(".escalate-btn").addEventListener("click", async (ev) => {
+        const button = ev.currentTarget;
+        if (button.disabled) return;
+        button.disabled = true;
+        button.textContent = "Escalating…";
+        try {
+          await fetchJSON("/escalate-event", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ event_id: button.dataset.event }),
+          });
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "Retry escalation";
+          console.error("[VitalTime] Failed to escalate event", error);
+        }
+      });
     }
 
     const badge = node.querySelector(".tier-badge");
@@ -867,6 +909,16 @@ function renderEventFeed(events) {
     }
     if (assignedEl.textContent !== assignedText) assignedEl.textContent = assignedText;
     assignedEl.classList.toggle("event-assigned-predicted", !e.assigned_staff_id && !!e.predicted_next_staff_id);
+    node.querySelector(".event-countdown").textContent = tendingCountdown(e);
+    const escalateBtn = node.querySelector(".escalate-btn");
+    const canEscalate = e.tier === 2 && e.status !== "resolved";
+    escalateBtn.hidden = !canEscalate;
+    if (canEscalate) {
+      escalateBtn.dataset.event = e.event_id;
+      if (!escalateBtn.disabled) escalateBtn.textContent = "Escalate to T1";
+    } else {
+      escalateBtn.disabled = false;
+    }
 
     // Keep DOM order matching the sorted event list, but only move a node
     // when it's actually out of place.

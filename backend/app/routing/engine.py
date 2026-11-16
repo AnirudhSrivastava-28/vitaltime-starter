@@ -200,6 +200,28 @@ def clear_assignment(event_id: str, now: Optional[datetime] = None) -> Optional[
     return _process_pending(now)
 
 
+def escalate_event(event_id: str, now: Optional[datetime] = None) -> Optional[AssignmentResult]:
+    """Escalate an active Tier 2 event to Tier 1 and route it again."""
+    now = now or datetime.utcnow()
+    tick(now)
+    event = store.get_event(event_id)
+    if event is None or event.status == "resolved" or event.tier != 2:
+        return None
+
+    assigned_staff = store.get_staff(event.assigned_staff_id) if event.assigned_staff_id else None
+    if assigned_staff is not None:
+        interrupted_id = store.release_interrupted_event(assigned_staff, now)
+        if interrupted_id != event_id:
+            return None
+
+    event = store.prepare_escalation(event_id)
+    if event is None:
+        return None
+    result = _assign_event(event, now)
+    _process_pending(now)
+    return result
+
+
 def reset_simulation() -> None:
     """Reinitialize the backend simulation state and notify clients.
 
