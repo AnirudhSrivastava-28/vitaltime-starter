@@ -165,6 +165,61 @@
     .simulator { grid-template-columns: 1fr; }
     .simulator-result { grid-column: auto; }
   }
+  .comparison-panel {
+    border-bottom: 1px solid var(--line);
+    padding: 18px 28px;
+    background: var(--bg-void);
+  }
+  .comparison-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .comparison-header h2 { margin: 0 0 4px; font-size: 15px; }
+  .comparison-header p { margin: 0; color: var(--ink-muted); font-size: 12px; }
+  .comparison-controls { display: flex; align-items: end; gap: 8px; }
+  .comparison-controls label {
+    color: var(--ink-muted);
+    display: flex;
+    flex-direction: column;
+    font: 10px var(--font-data);
+    gap: 5px;
+    text-transform: uppercase;
+  }
+  .comparison-controls input {
+    background: var(--bg-panel-raised);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    font: 12px var(--font-data);
+    padding: 7px 8px;
+    width: 76px;
+  }
+  .comparison-controls button {
+    background: var(--role-rn);
+    border: 0;
+    border-radius: 6px;
+    color: white;
+    cursor: pointer;
+    font: 600 12px var(--font-label);
+    padding: 8px 12px;
+  }
+  .comparison-controls button:disabled { cursor: wait; opacity: 0.65; }
+  .comparison-result { margin-top: 16px; overflow-x: auto; }
+  .comparison-result table { border-collapse: collapse; min-width: 680px; width: 100%; }
+  .comparison-result th,
+  .comparison-result td {
+    border-bottom: 1px solid var(--line);
+    padding: 8px 10px;
+    text-align: left;
+    font: 11px var(--font-data);
+  }
+  .comparison-result th { color: var(--ink-muted); font-size: 10px; text-transform: uppercase; }
+  .comparison-result td:not(:first-child) { color: var(--ink); }
+  .comparison-result .metric-label { color: var(--ink-muted); }
+  .comparison-note { color: var(--ink-faint); font: 10px var(--font-data); margin-top: 10px; }
 
   /* ---------- tier legend strip ---------- */
   .legend {
@@ -445,6 +500,24 @@
     </div>
     <button class="simulator-submit" id="simulation-submit" type="button">Submit event</button>
     <div class="simulator-result" id="simulation-result" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="comparison-panel" aria-labelledby="comparison-title">
+    <div class="comparison-header">
+      <div>
+        <h2 id="comparison-title">VitalTime vs. call-light</h2>
+        <p>Paired Monte Carlo comparison using the same events for every policy.</p>
+      </div>
+      <div class="comparison-controls">
+        <label>Trials <input id="comparison-trials" type="number" min="1" max="200" value="20"></label>
+        <label>Seed <input id="comparison-seed" type="number" value="20261116"></label>
+        <button id="comparison-run" type="button">Run comparison</button>
+      </div>
+    </div>
+    <div class="comparison-result" id="comparison-result">
+      <div class="empty-state">Run a comparison to see response time, SLA, mismatches, duplicates, and fatigue.</div>
+    </div>
+    <div class="comparison-note">Call-light values are modeled assumptions, not measured behavior. Fatigue uses VitalTime’s formula as a shared ruler.</div>
   </section>
 
   <div class="body-grid">
@@ -1213,10 +1286,71 @@ function setupSimulationForm() {
   });
 }
 
+function formatMetric(value) {
+  return Number(value).toFixed(2);
+}
+
+function renderComparison(result) {
+  const metrics = [
+    ["Mean response (min)", "response_time_minutes", "mean"],
+    ["Response p95 (min)", "response_time_minutes", "p95"],
+    ["SLA compliance", "sla_compliance", "mean"],
+    ["Qualification mismatch", "qualification_mismatch_rate", "mean"],
+    ["Duplicate responders", "duplicate_responders", "mean"],
+    ["Fatigue per event", "fatigue_per_event", "mean"],
+  ];
+  const labels = {
+    vitaltime: "VitalTime",
+    call_light_a: "Call-light A",
+    call_light_b: "Call-light B",
+  };
+  const tiers = ["overall", "1", "2", "3"];
+  document.getElementById("comparison-result").innerHTML = `
+    <table>
+      <thead><tr><th>Metric · tier</th>${Object.keys(labels).map(key => `<th>${labels[key]}</th>`).join("")}</tr></thead>
+      <tbody>${tiers.flatMap(tier => metrics.map(([label, metric, stat]) => `
+        <tr>
+          <td class="metric-label">${label} · T${tier === "overall" ? "all" : tier}</td>
+          ${Object.keys(labels).map(policy => {
+            const value = result.policies[policy][tier][metric][stat];
+            const suffix = metric.includes("compliance") || metric.includes("mismatch") ? " (" + (Number(value) * 100).toFixed(1) + "%)" : "";
+            return `<td>${formatMetric(value)}${suffix}</td>`;
+          }).join("")}
+        </tr>`)).join("")}</tbody>
+    </table>`;
+}
+
+function setupComparison() {
+  const button = document.getElementById("comparison-run");
+  const result = document.getElementById("comparison-result");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Running…";
+    result.innerHTML = `<div class="empty-state">Running paired trials…</div>`;
+    try {
+      const payload = await fetchJSON("/comparison/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trials: Number(document.getElementById("comparison-trials").value),
+          seed: Number(document.getElementById("comparison-seed").value),
+        }),
+      });
+      renderComparison(payload);
+    } catch (error) {
+      result.innerHTML = `<div class="empty-state">Comparison failed: ${error.message}</div>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = "Run comparison";
+    }
+  });
+}
+
 /* =========================================================================
    Boot
    ========================================================================= */
 setupSimulationForm();
+setupComparison();
 connectStream();
 
 function tickClock() {

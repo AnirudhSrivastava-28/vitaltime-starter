@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import routing, dashboard
+from app.routers import comparison, routing, dashboard
 
 app = FastAPI(title="VitalTime API", version="0.5.0")
 app.include_router(dashboard.router)
@@ -15,6 +15,7 @@ app.add_middleware(
 )
 
 app.include_router(routing.router)
+app.include_router(comparison.router)
 
 @app.get("/health", tags=["health"])
 def health_check():
